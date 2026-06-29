@@ -42,6 +42,8 @@ class InstrumentAvoidanceConfig:
 class TrackValidationConfig:
     edge_margin: int = 8
     max_jump_px: float = 80.0
+    content_margin: int = 24
+    black_threshold: int = 12
 
 
 def cuda_is_available() -> bool:
@@ -349,6 +351,20 @@ def validate_tracked_points(
             & (points[:, 1] >= edge_margin)
             & (points[:, 1] < float(height - edge_margin))
         )
+
+    content_margin = max(0, int(config.content_margin))
+    if content_margin > 0:
+        content_pixels = frame_rgb.max(axis=2) > int(config.black_threshold)
+        coords = np.argwhere(content_pixels)
+        if len(coords):
+            y0, x0 = coords.min(axis=0)
+            y1, x1 = coords.max(axis=0)
+            valid &= (
+                (points[:, 0] >= float(x0 + content_margin))
+                & (points[:, 0] <= float(x1 - content_margin))
+                & (points[:, 1] >= float(y0 + content_margin))
+                & (points[:, 1] <= float(y1 - content_margin))
+            )
 
     max_jump = float(config.max_jump_px)
     if max_jump > 0 and len(last_valid_points) == len(points):
