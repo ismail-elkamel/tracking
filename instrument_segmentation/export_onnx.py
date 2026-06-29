@@ -5,7 +5,7 @@ from pathlib import Path
 
 import torch
 
-from instrument_segmentation.models import build_model
+from instrument_segmentation.models import DEFAULT_MODEL, build_model
 
 
 def export_checkpoint_to_onnx(
@@ -15,7 +15,7 @@ def export_checkpoint_to_onnx(
     opset: int = 18,
 ) -> Path:
     checkpoint = torch.load(checkpoint_path, map_location=device_name)
-    model_name = checkpoint.get("model", "deeplabv3plus_efficientnet_b4")
+    model_name = checkpoint.get("model", DEFAULT_MODEL)
     image_size = int(checkpoint.get("image_size", 512))
     device = torch.device(device_name)
 
