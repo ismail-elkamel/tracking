@@ -30,6 +30,60 @@ MedSAM2 is still used by the app, so it is kept. Endo-TTAP was removed because t
 
 TrackTention is not exposed as a runnable tracker. The paper describes a temporal attention layer that consumes point tracks from trackers such as CoTracker, rather than a standalone point-tracking inference backend for this app.
 
+## External Stuff
+
+Everything that is not pure app code lives under `external/` or `models/`.
+
+- External repos are Git submodules under `external/`.
+- Large model checkpoints are not committed to GitHub.
+- Local app adapters are expected as `infer_prompts.py` files inside the external repos.
+
+When cloning the project on a new machine, use:
+
+```bash
+git clone --recurse-submodules https://github.com/ismail-elkamel/tracking.git
+cd tracking
+```
+
+If the repo is already cloned, initialize or repair the external folders with:
+
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
+git submodule status --recursive
+```
+
+This fetches:
+
+```text
+external/MedSAM2          https://github.com/bowang-lab/MedSAM2.git
+external/SAM3             https://github.com/facebookresearch/sam3.git
+external/SurgiSAM2        https://github.com/Devanish31/SurgiSAM2.git
+external/Surgical-SAM-2   https://github.com/jinlab-imvr/Surgical-SAM-2.git
+external/lite-tracker     https://github.com/ImFusionGmbH/lite-tracker.git
+```
+
+Large checkpoints are intentionally not committed to GitHub. Download them locally after the submodules are initialized.
+
+Important: the app also calls local adapter scripts named `infer_prompts.py` for SAM2/SurgiSAM2, SAM3, and MedSAM2. Those files are project adapters, not part of the public upstream repos. If they exist on the old laptop, copy or commit them separately; otherwise the external repo code will be present but the Streamlit commands that call `external/*/infer_prompts.py` will still fail.
+
+Expected external adapter files:
+
+```text
+external/Surgical-SAM-2/infer_prompts.py
+external/SAM3/infer_prompts.py
+external/MedSAM2/infer_prompts.py
+```
+
+Expected local checkpoint files:
+
+```text
+models/scaled_online.pth
+external/Surgical-SAM-2/checkpoints/sam2.1_hiera_small.pt
+external/Surgical-SAM-2/checkpoints/Curated400_checkpoint_26.pt
+external/MedSAM2/checkpoints/
+```
+
 ## SAM2 vs SurgiSAM2
 
 `SAM2` and `SurgiSAM2` are now two separate selectable models so you can compare them directly.
@@ -59,6 +113,13 @@ external/Surgical-SAM-2/infer_prompts.py
 ```
 
 It is only an implementation wrapper used by both `SAM2` and `SurgiSAM2`; the Streamlit UI no longer exposes a model called `Surgical-SAM-2`.
+
+Adapter commands:
+
+```bash
+python external/Surgical-SAM-2/infer_prompts.py --model-profile sam2
+python external/Surgical-SAM-2/infer_prompts.py --model-profile surgisam2
+```
 
 ## SAM3
 
@@ -92,6 +153,48 @@ Then use the `SAM3` option in the app. The default command uses:
 ```bash
 conda run -n track_env python external/SAM3/infer_prompts.py
 ```
+
+## MedSAM2
+
+The app uses:
+
+```text
+external/MedSAM2/infer_prompts.py
+```
+
+The adapter converts the app's point/region prompts into the first-frame mask that upstream MedSAM2 video inference expects.
+
+## External Command Placeholders
+
+External commands may use these placeholders:
+
+- `{video}`: OpenCV-compatible input video path.
+- `{start_frame}`: selected starting frame.
+- `{prompts}`: JSON file containing selected points/regions.
+- `{output}`: MP4 path that the external model must create.
+- `{device}`: `cuda` or `cpu`.
+
+Prompt JSON shape:
+
+```json
+{
+  "start_frame": 0,
+  "annotations": [
+    {
+      "label": "circle 1",
+      "kind": "point",
+      "points_xy": [[120.0, 80.0]]
+    },
+    {
+      "label": "path 2",
+      "kind": "region",
+      "points_xy": [[10.0, 20.0], [30.0, 40.0]]
+    }
+  ]
+}
+```
+
+The external script must write an annotated/result MP4 at `{output}`.
 
 ## GPU Status
 
@@ -127,30 +230,51 @@ To recreate the main app environment:
 conda create -n track_env python=3.11 pip
 conda activate track_env
 python -m pip install -r requirements.txt
+git submodule update --init --recursive
 ```
 
 ## Checkpoints
 
-For immediate generic SAM2 testing:
+LiteTracker point tracking weights:
+
+```bash
+mkdir -p models
+python - <<'PY'
+from pathlib import Path
+import urllib.request
+
+url = "https://huggingface.co/facebook/cotracker3/resolve/main/scaled_online.pth"
+path = Path("models/scaled_online.pth")
+urllib.request.urlretrieve(url, path)
+print(path)
+PY
+```
+
+Generic SAM2.1 small checkpoint:
 
 ```bash
 cd external/Surgical-SAM-2/checkpoints
 bash download_ckpts.sh
+cd ../../..
 ```
 
-For SurgiSAM2:
+SurgiSAM2 fine-tuned checkpoint:
+
+Download `Curated400_checkpoint_26.pt` from the SurgiSAM2 checkpoint page listed below, then place it here:
 
 ```bash
-cd external/Surgical-SAM-2/checkpoints
-bash download_surgisam2_finetuned.sh
+mkdir -p external/Surgical-SAM-2/checkpoints
+# copy or move the downloaded file to:
+# external/Surgical-SAM-2/checkpoints/Curated400_checkpoint_26.pt
 ```
 
-For MedSAM2:
+MedSAM2 checkpoints and package install:
 
 ```bash
 cd external/MedSAM2
 SAM2_BUILD_CUDA=0 python -m pip install -e .
 bash download.sh
+cd ../..
 ```
 
 ## Outputs

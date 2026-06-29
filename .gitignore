@@ -19,15 +19,15 @@ env/
 
 # Models / weights / large files
 models/
+external/**/checkpoints/
+external/**/*.ckpt
+external/**/*.safetensors
 *.pt
 *.pth
 *.onnx
 *.h5
 *.pkl
 *.joblib
-
-# External cloned repositories
-external/
 
 # Jupyter / IDE
 .ipynb_checkpoints/

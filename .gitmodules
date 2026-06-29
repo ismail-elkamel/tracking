@@ -1,0 +1,20 @@
+[submodule "external/MedSAM2"]
+	path = external/MedSAM2
+	url = https://github.com/bowang-lab/MedSAM2.git
+	branch = main
+[submodule "external/SAM3"]
+	path = external/SAM3
+	url = https://github.com/facebookresearch/sam3.git
+	branch = main
+[submodule "external/SurgiSAM2"]
+	path = external/SurgiSAM2
+	url = https://github.com/Devanish31/SurgiSAM2.git
+	branch = main
+[submodule "external/Surgical-SAM-2"]
+	path = external/Surgical-SAM-2
+	url = https://github.com/jinlab-imvr/Surgical-SAM-2.git
+	branch = training
+[submodule "external/lite-tracker"]
+	path = external/lite-tracker
+	url = https://github.com/ImFusionGmbH/lite-tracker.git
+	branch = master
