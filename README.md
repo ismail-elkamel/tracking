@@ -196,6 +196,92 @@ Prompt JSON shape:
 
 The external script must write an annotated/result MP4 at `{output}`.
 
+## Instrument Segmentation Training
+
+The folder `instrument_segmentation/` contains a separate training pipeline for a binary segmentation model that predicts only surgical instruments. The dataset source is:
+
+```text
+data/Instrument segmentation
+```
+
+Only annotation objects with:
+
+```text
+classTitle == "Instrument"
+```
+
+are used as positive pixels. Kidney, tumor, vessel, spleen, cavity, ROI, and all other labels are ignored and treated as background.
+
+Install the extra training dependencies:
+
+```bash
+conda activate track_env
+python -m pip install -r requirements.txt
+python -m pip install "setuptools<82" wheel
+python -m pip install --no-build-isolation visdom
+```
+
+Start Visdom in one terminal:
+
+```bash
+conda activate track_env
+python -m visdom.server -port 8097
+```
+
+Open:
+
+```text
+http://localhost:8097
+```
+
+Train the default high-quality model, `DeepLabV3+` with an ImageNet-pretrained EfficientNet-B4 encoder:
+
+```bash
+conda activate track_env
+python -m instrument_segmentation.train \
+  --data-root "data/Instrument segmentation" \
+  --output-dir instrument_segmentation/runs/instrument_model \
+  --model deeplabv3plus_efficientnet_b4 \
+  --epochs 50 \
+  --batch-size 4 \
+  --image-size 512 \
+  --visdom
+```
+
+The default validation split uses units `U61` and `U65`. To choose another validation set:
+
+```bash
+python -m instrument_segmentation.train --val-units UT8 UT9 --visdom
+```
+
+For a quick smoke test before the full run:
+
+```bash
+python -m instrument_segmentation.train \
+  --epochs 1 \
+  --batch-size 2 \
+  --image-size 128 \
+  --num-workers 0 \
+  --max-train-samples 4 \
+  --max-val-samples 2
+```
+
+Checkpoints are written locally and ignored by Git:
+
+```text
+instrument_segmentation/runs/instrument_model/best.pt
+instrument_segmentation/runs/instrument_model/last.pt
+```
+
+Preview a trained model on one image:
+
+```bash
+python -m instrument_segmentation.predict \
+  --checkpoint instrument_segmentation/runs/instrument_model/best.pt \
+  --image "data/Instrument segmentation/UT1/img/YOUR_IMAGE.png" \
+  --output instrument_segmentation/runs/preview.png
+```
+
 ## GPU Status
 
 Your NVIDIA driver is visible through `nvidia-smi`, but the old `track_env` PyTorch build was failing at CUDA initialization. I replaced the unusual `torch 2.12.0+cu130` build with the stable CUDA 12.8 PyTorch build. Recheck with:
