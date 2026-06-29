@@ -6,7 +6,7 @@ import torch
 from PIL import Image
 
 from instrument_segmentation.inference import preprocess_pil, save_overlay
-from instrument_segmentation.models import build_model
+from instrument_segmentation.models import DEFAULT_MODEL, build_model
 
 
 def main() -> None:
@@ -19,7 +19,7 @@ def main() -> None:
     args = parser.parse_args()
 
     checkpoint = torch.load(args.checkpoint, map_location=args.device)
-    model_name = checkpoint.get("model", "deeplabv3plus_efficientnet_b4")
+    model_name = checkpoint.get("model", DEFAULT_MODEL)
     image_size = int(checkpoint.get("image_size", 512))
     model = build_model(model_name).to(args.device)
     model.load_state_dict(checkpoint["state_dict"])
