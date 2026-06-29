@@ -67,6 +67,8 @@ Large checkpoints are intentionally not committed to GitHub. Download them local
 
 Important: the app also calls local adapter scripts named `infer_prompts.py` for SAM2/SurgiSAM2, SAM3, and MedSAM2. Those files are project adapters, not part of the public upstream repos. If they exist on the old laptop, copy or commit them separately; otherwise the external repo code will be present but the Streamlit commands that call `external/*/infer_prompts.py` will still fail.
 
+Streamlit hides these external trackers automatically when their adapter file is missing, so comparison runs do not fail late with a missing-script error.
+
 Expected external adapter files:
 
 ```text
