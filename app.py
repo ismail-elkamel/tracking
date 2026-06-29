@@ -477,6 +477,8 @@ def generate_grid_tracks(
                 continue
             points.append(np.array([[x, y]], dtype=np.float32))
     if max_points > 0:
+        center = np.array([frame_width / 2.0, frame_height / 2.0], dtype=np.float32)
+        points.sort(key=lambda item: float(np.linalg.norm(item[0] - center)))
         points = points[:max_points]
     labels = [f"grid {index}" for index in range(1, len(points) + 1)]
     return points, labels
@@ -640,12 +642,15 @@ with st.sidebar:
     stroke_width = st.slider("Line width", 1, 8, 3)
     stroke_color = st.color_picker("Color", "#ff485c")
     add_point_cloud = st.checkbox("Add point cloud", value=False)
-    point_cloud_area = "Full frame"
-    grid_spacing = 96
-    grid_margin = 16
-    grid_max_points = 75
+    point_cloud_area = "Drawn rect/polygon areas"
+    grid_spacing = 120
+    grid_margin = 48
+    grid_max_points = 50
     if add_point_cloud:
-        point_cloud_area = st.selectbox("Point cloud area", ["Full frame", "Drawn rect/polygon areas"])
+        point_cloud_area = st.selectbox(
+            "Point cloud area",
+            ["Drawn rect/polygon areas", "Full frame"],
+        )
         point_cloud_preset = st.selectbox("Point cloud speed", ["Fast", "Balanced", "Dense"])
         preset_spacing, preset_max_points = {
             "Fast": (120, 50),
@@ -653,7 +658,7 @@ with st.sidebar:
             "Dense": (64, 200),
         }[point_cloud_preset]
         grid_spacing = st.slider("Grid spacing", 8, 200, preset_spacing, 8)
-        grid_margin = st.slider("Grid margin", 0, 120, 16, 4)
+        grid_margin = st.slider("Grid margin", 0, 160, 48, 4)
         grid_max_points = st.slider("Max grid points", 10, 500, preset_max_points, 10)
     enable_gpu_local_neural = st.checkbox("Use GPU for CoTracker/LiteTracker", value=False)
     st.divider()
@@ -673,27 +678,31 @@ with st.sidebar:
         collage_tile_width = 640
     frame_skip = st.slider("OpenCV frame step", 1, 10, 1)
     model_max_side = st.slider("Neural model max side", 256, 1024, 384, 64)
-    freeze_lost_points = st.checkbox("Hide lost points and resume when visible", value=False)
+    freeze_lost_points = st.checkbox("Hide lost points and resume when visible", value=True)
     reject_drift_points = st.checkbox("Reject border/jump drift", value=True)
     track_validation: TrackValidationConfig | None = None
     if reject_drift_points:
-        edge_margin_px = st.slider("Reject points within edge px", 0, 80, 8, 1)
-        max_jump_px = st.slider("Reject point jumps over px", 0, 300, 80, 5)
+        edge_margin_px = st.slider("Reject points within edge px", 0, 120, 32, 1)
+        max_jump_px = st.slider("Reject point jumps over px", 0, 300, 50, 5)
         track_validation = TrackValidationConfig(
             edge_margin=edge_margin_px,
             max_jump_px=float(max_jump_px),
         )
         st.caption("Hides points that stick to the frame border or jump too far between frames.")
-    avoid_instruments = st.checkbox("Avoid instruments with ONNX mask", value=False)
+    default_instrument_onnx_path = Path("instrument_segmentation/runs/instrument_model/best.onnx")
+    avoid_instruments = st.checkbox(
+        "Avoid instruments with ONNX mask",
+        value=default_instrument_onnx_path.exists(),
+    )
     instrument_avoidance: InstrumentAvoidanceConfig | None = None
     if avoid_instruments:
         instrument_onnx_path = st.text_input(
             "Instrument ONNX model",
-            "instrument_segmentation/runs/instrument_model/best.onnx",
+            str(default_instrument_onnx_path),
         )
         instrument_mask_size = st.slider("Instrument mask model size", 128, 1024, 512, 64)
-        instrument_threshold = st.slider("Instrument mask threshold", 0.05, 0.95, 0.40, 0.05)
-        instrument_dilation = st.slider("Instrument avoid margin px", 0, 40, 7, 1)
+        instrument_threshold = st.slider("Instrument mask threshold", 0.05, 0.95, 0.35, 0.05)
+        instrument_dilation = st.slider("Instrument avoid margin px", 0, 60, 15, 1)
         instrument_avoidance = InstrumentAvoidanceConfig(
             onnx_path=instrument_onnx_path,
             image_size=instrument_mask_size,
