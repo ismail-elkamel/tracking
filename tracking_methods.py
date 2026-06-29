@@ -38,6 +38,12 @@ class InstrumentAvoidanceConfig:
     dilation: int = 7
 
 
+@dataclass(frozen=True)
+class TrackValidationConfig:
+    edge_margin: int = 8
+    max_jump_px: float = 80.0
+
+
 def cuda_is_available() -> bool:
     import torch
 
@@ -315,6 +321,41 @@ def points_outside_instrument(points: np.ndarray, instrument_mask: np.ndarray | 
         & (rounded[:, 1] < height)
     )
     return in_bounds & ~instrument_mask[y, x]
+
+
+def validate_tracked_points(
+    points: np.ndarray,
+    last_valid_points: np.ndarray,
+    frame_rgb: np.ndarray,
+    config: TrackValidationConfig | None,
+    base_valid_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    if base_valid_mask is None:
+        valid = np.ones(len(points), dtype=bool)
+    else:
+        valid = base_valid_mask.astype(bool, copy=True)
+    if config is None or len(points) == 0:
+        return valid
+
+    height, width = frame_rgb.shape[:2]
+    finite = np.isfinite(points).all(axis=1)
+    valid &= finite
+
+    edge_margin = max(0, int(config.edge_margin))
+    if edge_margin > 0:
+        valid &= (
+            (points[:, 0] >= edge_margin)
+            & (points[:, 0] < float(width - edge_margin))
+            & (points[:, 1] >= edge_margin)
+            & (points[:, 1] < float(height - edge_margin))
+        )
+
+    max_jump = float(config.max_jump_px)
+    if max_jump > 0 and len(last_valid_points) == len(points):
+        jump = np.linalg.norm(points - last_valid_points, axis=1)
+        valid &= jump <= max_jump
+
+    return valid
 
 
 def regroup_visible_points(
@@ -617,6 +658,7 @@ def track_with_cotracker3_online(
     show_live_preview: bool = False,
     freeze_lost: bool = False,
     instrument_avoidance: InstrumentAvoidanceConfig | None = None,
+    track_validation: TrackValidationConfig | None = None,
 ) -> Path | None:
     import torch
 
@@ -687,15 +729,22 @@ def track_with_cotracker3_online(
             if predicted_index >= len(predicted):
                 predicted_index = local_index
             points = predicted[predicted_index] / model_scale
-            if freeze_lost or instrument_avoidance is not None:
+            if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                 instrument_mask = predict_instrument_mask(original_rgb, instrument_avoidance)
-                instrument_valid = points_outside_instrument(points, instrument_mask)
+                valid_mask = points_outside_instrument(points, instrument_mask)
+                valid_mask = validate_tracked_points(
+                    points,
+                    last_valid_points,
+                    original_rgb,
+                    track_validation,
+                    valid_mask,
+                )
                 points, last_valid_points, visible_points = filter_visible_points(
                     points,
                     last_valid_points,
                     visible_points,
                     original_rgb,
-                    instrument_valid,
+                    valid_mask,
                 )
                 grouped_tracks = regroup_visible_points(points, group_sizes, visible_points)
             else:
@@ -734,15 +783,22 @@ def track_with_cotracker3_online(
                 ).astype(np.float32)
                 queries = torch.from_numpy(query_data)[None].to(device)
                 output_writer = open_output_writer(saved_path, frame_rgb, fps)
-                if instrument_avoidance is not None:
+                if instrument_avoidance is not None or track_validation is not None:
                     instrument_mask = predict_instrument_mask(frame_rgb, instrument_avoidance)
-                    instrument_valid = points_outside_instrument(flat_points, instrument_mask)
+                    valid_mask = points_outside_instrument(flat_points, instrument_mask)
+                    valid_mask = validate_tracked_points(
+                        flat_points,
+                        last_valid_points,
+                        frame_rgb,
+                        track_validation,
+                        valid_mask,
+                    )
                     initial_points, last_valid_points, visible_points = filter_visible_points(
                         flat_points,
                         last_valid_points,
                         visible_points,
                         frame_rgb,
-                        instrument_valid,
+                        valid_mask,
                     )
                     initial_tracks = regroup_visible_points(initial_points, group_sizes, visible_points)
                 else:
@@ -785,6 +841,7 @@ def track_with_cotracker3_offline(
     freeze_lost: bool = False,
     chunk_frames: int = 64,
     instrument_avoidance: InstrumentAvoidanceConfig | None = None,
+    track_validation: TrackValidationConfig | None = None,
 ) -> Path | None:
     import torch
 
@@ -871,11 +928,18 @@ def track_with_cotracker3_offline(
 
             for relative_frame, frame_rgb in enumerate(original_frames):
                 points = predicted[relative_frame]
-                if freeze_lost or instrument_avoidance is not None:
+                if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                     valid_mask = visibility[relative_frame] if visibility is not None else np.ones(len(points), dtype=bool)
                     if instrument_avoidance is not None:
                         instrument_mask = predict_instrument_mask(frame_rgb, instrument_avoidance)
                         valid_mask = valid_mask & points_outside_instrument(points, instrument_mask)
+                    valid_mask = validate_tracked_points(
+                        points,
+                        last_valid_points,
+                        frame_rgb,
+                        track_validation,
+                        valid_mask,
+                    )
                     points, last_valid_points, visible_points = filter_visible_points(
                         points,
                         last_valid_points,
@@ -902,7 +966,7 @@ def track_with_cotracker3_offline(
                     sync_to_video_clock(start_time, rendered_frame - start_frame, fps)
                 frames_written += 1
 
-            if freeze_lost or instrument_avoidance is not None:
+            if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                 current_query_points = last_valid_points.copy()
             else:
                 current_query_points = predicted[-1].astype(np.float32)
@@ -933,6 +997,7 @@ def track_with_litetracker(
     show_live_preview: bool = False,
     freeze_lost: bool = False,
     instrument_avoidance: InstrumentAvoidanceConfig | None = None,
+    track_validation: TrackValidationConfig | None = None,
 ) -> Path | None:
     import torch
 
@@ -979,15 +1044,22 @@ def track_with_litetracker(
                 )
                 coords, _, _ = model(frame_tensor, queries=queries)
                 points = coords[0, -1].detach().cpu().numpy() / model_scale
-                if freeze_lost or instrument_avoidance is not None:
+                if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                     instrument_mask = predict_instrument_mask(frame_rgb, instrument_avoidance)
-                    instrument_valid = points_outside_instrument(points, instrument_mask)
+                    valid_mask = points_outside_instrument(points, instrument_mask)
+                    valid_mask = validate_tracked_points(
+                        points,
+                        last_valid_points,
+                        frame_rgb,
+                        track_validation,
+                        valid_mask,
+                    )
                     points, last_valid_points, visible_points = filter_visible_points(
                         points,
                         last_valid_points,
                         visible_points,
                         frame_rgb,
-                        instrument_valid,
+                        valid_mask,
                     )
                     grouped_tracks = regroup_visible_points(points, group_sizes, visible_points)
                 else:
@@ -1027,6 +1099,7 @@ def track_with_lk(
     show_live_preview: bool = False,
     freeze_lost: bool = False,
     instrument_avoidance: InstrumentAvoidanceConfig | None = None,
+    track_validation: TrackValidationConfig | None = None,
 ) -> Path | None:
     cap = cv2.VideoCapture(path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -1051,14 +1124,21 @@ def track_with_lk(
     rgb = cv2.cvtColor(previous_bgr, cv2.COLOR_BGR2RGB)
     output_writer = open_output_writer(output_path, rgb, fps)
     saved_path = Path(output_path) if output_path else None
-    if instrument_avoidance is not None:
+    if instrument_avoidance is not None or track_validation is not None:
         instrument_mask = predict_instrument_mask(rgb, instrument_avoidance)
         for index, points in enumerate(active_tracks):
-            visible_tracks[index] = points_outside_instrument(points, instrument_mask)
+            valid_mask = points_outside_instrument(points, instrument_mask)
+            visible_tracks[index] = validate_tracked_points(
+                points,
+                points,
+                rgb,
+                track_validation,
+                valid_mask,
+            )
     displayed_tracks = [
         points[visible_tracks[index]]
         for index, points in enumerate(active_tracks)
-    ] if freeze_lost or instrument_avoidance is not None else active_tracks
+    ] if freeze_lost or instrument_avoidance is not None or track_validation is not None else active_tracks
     emit_tracked_frame(rgb, displayed_tracks, labels, output_writer, show_live_preview, frame_placeholder)
 
     try:
@@ -1085,21 +1165,29 @@ def track_with_lk(
                     status = status.reshape(-1).astype(bool)
                     updated = points.copy()
                     candidate_points = next_points.reshape(-1, 2)
-                    if freeze_lost or instrument_avoidance is not None:
+                    if freeze_lost or instrument_avoidance is not None or track_validation is not None:
+                        valid_mask = status
                         if instrument_avoidance is not None:
                             instrument_mask = predict_instrument_mask(next_rgb, instrument_avoidance)
-                            status = status & points_outside_instrument(candidate_points, instrument_mask)
+                            valid_mask = valid_mask & points_outside_instrument(candidate_points, instrument_mask)
+                        valid_mask = validate_tracked_points(
+                            candidate_points,
+                            updated,
+                            next_rgb,
+                            track_validation,
+                            valid_mask,
+                        )
                         updated, _, visible_tracks[index] = filter_visible_points(
                             candidate_points,
                             updated,
                             visible_tracks[index],
                             next_rgb,
-                            status,
+                            valid_mask,
                         )
                     else:
                         updated[status] = candidate_points[status]
                     active_tracks[index] = updated
-                elif freeze_lost or instrument_avoidance is not None:
+                elif freeze_lost or instrument_avoidance is not None or track_validation is not None:
                     visible_tracks[index][:] = False
 
             current_frame = target_frame
@@ -1108,7 +1196,7 @@ def track_with_lk(
             displayed_tracks = [
                 points[visible_tracks[index]]
                 for index, points in enumerate(active_tracks)
-            ] if freeze_lost or instrument_avoidance is not None else active_tracks
+            ] if freeze_lost or instrument_avoidance is not None or track_validation is not None else active_tracks
             emit_tracked_frame(
                 rgb,
                 displayed_tracks,
