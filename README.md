@@ -348,6 +348,36 @@ python -m instrument_segmentation.infer_video \
   --save-mask-video instrument_segmentation/runs/video1_instrument_mask.mp4
 ```
 
+## Instrument Avoidance During Tracking
+
+The Streamlit tracker can use the trained instrument ONNX model to avoid tracking points on surgical tools. This applies to the built-in local trackers: OpenCV Lucas-Kanade, CoTracker3, and LiteTracker.
+
+In the sidebar, enable:
+
+```text
+Avoid instruments with ONNX mask
+```
+
+Default model path:
+
+```text
+instrument_segmentation/runs/instrument_model/best.onnx
+```
+
+If PyTorch exported a sidecar file, keep it next to the ONNX file:
+
+```text
+instrument_segmentation/runs/instrument_model/best.onnx.data
+```
+
+Controls:
+
+- `Instrument mask threshold`: lower values avoid more pixels, higher values are stricter.
+- `Instrument avoid margin px`: dilates the instrument mask so points stay a few pixels away from tools.
+- `Instrument mask model size`: input size used for ONNX inference, usually the training `image-size`.
+
+When a tracked point lands on the instrument mask, the app hides it and keeps its last valid non-instrument position internally. The point can appear again when the tracker predicts it outside the instrument mask.
+
 ## GPU Status
 
 Your NVIDIA driver is visible through `nvidia-smi`, but the old `track_env` PyTorch build was failing at CUDA initialization. I replaced the unusual `torch 2.12.0+cu130` build with the stable CUDA 12.8 PyTorch build. Recheck with:
