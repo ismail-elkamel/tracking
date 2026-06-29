@@ -38,6 +38,7 @@ from tracking_methods import (
     default_litetracker_weights_path,
     download_litetracker_weights,
     draw_tracks,
+    external_tracker_is_available,
     external_tracker_setup_instructions,
     run_external_tracker,
     track_with_cotracker3_offline,
@@ -45,6 +46,7 @@ from tracking_methods import (
     track_with_litetracker,
     track_with_lk,
     tracker_slug,
+    unavailable_external_tracker_message,
 )
 
 
@@ -698,7 +700,17 @@ with st.sidebar:
         grid_max_points = st.slider("Max grid points", 10, 500, preset_max_points, 10)
     enable_gpu_local_neural = st.checkbox("Use GPU for CoTracker/LiteTracker", value=False)
     st.divider()
-    tracker_options = TRACKER_OPTIONS
+    unavailable_trackers = [
+        tracker
+        for tracker in TRACKER_OPTIONS
+        if tracker in {SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER}
+        and not external_tracker_is_available(tracker)
+    ]
+    tracker_options = [tracker for tracker in TRACKER_OPTIONS if tracker not in unavailable_trackers]
+    if unavailable_trackers:
+        with st.expander("Unavailable external trackers", expanded=False):
+            for unavailable_tracker in unavailable_trackers:
+                st.warning(unavailable_external_tracker_message(unavailable_tracker))
     compare_mode = st.checkbox("Compare models", value=False)
     if compare_mode:
         selected_trackers = st.multiselect(
