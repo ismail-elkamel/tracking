@@ -389,6 +389,7 @@ Reject border/jump drift
 Controls:
 
 - `Reject points within edge px`: hides points too close to the frame edge.
+- `Reject points near content edge px`: hides points too close to the non-black surgical image boundary.
 - `Reject point jumps over px`: hides points that move too far from their last valid position in one step.
 
 Default conservative values:
@@ -396,6 +397,7 @@ Default conservative values:
 ```text
 Hide lost points and resume when visible = on
 Reject points within edge px = 32
+Reject points near content edge px = 48
 Reject point jumps over px = 50
 ```
 
