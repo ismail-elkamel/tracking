@@ -16,9 +16,12 @@ env/
 # Streamlit cache
 .streamlit/cache/
 
+#data
+data/
 
 # Models / weights / large files
 models/
+instrument_segmentation/runs/
 external/**/checkpoints/
 external/**/*.ckpt
 external/**/*.safetensors
