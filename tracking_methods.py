@@ -124,6 +124,32 @@ def default_external_command(tracker_name: str) -> str:
     return ""
 
 
+def external_tracker_adapter_path(tracker_name: str) -> Path | None:
+    if tracker_name in {SAM2_TRACKER, SURGISAM2_TRACKER}:
+        return Path("external/Surgical-SAM-2/infer_prompts.py")
+    if tracker_name == SAM3_TRACKER:
+        return Path("external/SAM3/infer_prompts.py")
+    if tracker_name == MEDSAM2_TRACKER:
+        return Path("external/MedSAM2/infer_prompts.py")
+    return None
+
+
+def external_tracker_is_available(tracker_name: str) -> bool:
+    adapter_path = external_tracker_adapter_path(tracker_name)
+    return adapter_path is None or adapter_path.exists()
+
+
+def unavailable_external_tracker_message(tracker_name: str) -> str:
+    adapter_path = external_tracker_adapter_path(tracker_name)
+    if adapter_path is None:
+        return ""
+    return (
+        f"{tracker_name} is hidden because `{adapter_path}` is missing. "
+        "The public external repo is present, but this app also needs its local "
+        "`infer_prompts.py` adapter."
+    )
+
+
 def external_tracker_setup_instructions(tracker_name: str) -> str:
     if tracker_name == SAM2_TRACKER:
         return (
