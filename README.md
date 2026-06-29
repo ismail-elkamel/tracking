@@ -303,6 +303,27 @@ python -m instrument_segmentation.test_onnx \
   --threshold 0.5
 ```
 
+Run ONNX inference directly on a video:
+
+```bash
+python -m instrument_segmentation.infer_video \
+  --onnx instrument_segmentation/runs/instrument_model/best.onnx \
+  --video data/input/video1.mp4 \
+  --output instrument_segmentation/runs/video1_instrument_overlay.mp4 \
+  --image-size 512 \
+  --threshold 0.5
+```
+
+To also save a black/white instrument mask video:
+
+```bash
+python -m instrument_segmentation.infer_video \
+  --onnx instrument_segmentation/runs/instrument_model/best.onnx \
+  --video data/input/video1.mp4 \
+  --output instrument_segmentation/runs/video1_instrument_overlay.mp4 \
+  --save-mask-video instrument_segmentation/runs/video1_instrument_mask.mp4
+```
+
 ## GPU Status
 
 Your NVIDIA driver is visible through `nvidia-smi`, but the old `track_env` PyTorch build was failing at CUDA initialization. I replaced the unusual `torch 2.12.0+cu130` build with the stable CUDA 12.8 PyTorch build. Recheck with:
