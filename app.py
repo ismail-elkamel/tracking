@@ -30,6 +30,7 @@ from tracking_methods import (
     SAM2_TRACKER,
     SAM3_TRACKER,
     SURGISAM2_TRACKER,
+    TrackValidationConfig,
     create_comparison_collage,
     cuda_is_available,
     cuda_summary,
@@ -535,6 +536,7 @@ def run_tracker_model(
     show_live_preview: bool,
     freeze_lost_points: bool,
     instrument_avoidance: InstrumentAvoidanceConfig | None,
+    track_validation: TrackValidationConfig | None,
 ) -> Path | None:
     if tracker_name == OPENCV_TRACKER:
         return track_with_lk(
@@ -551,6 +553,7 @@ def run_tracker_model(
             show_live_preview,
             freeze_lost_points,
             instrument_avoidance,
+            track_validation,
         )
     if tracker_name == COTRACKER_TRACKER:
         return track_with_cotracker3_online(
@@ -568,6 +571,7 @@ def run_tracker_model(
             show_live_preview,
             freeze_lost_points,
             instrument_avoidance,
+            track_validation,
         )
     if tracker_name == COTRACKER_OFFLINE_TRACKER:
         return track_with_cotracker3_offline(
@@ -586,6 +590,7 @@ def run_tracker_model(
             freeze_lost_points,
             cotracker_offline_chunk_frames,
             instrument_avoidance,
+            track_validation,
         )
     if tracker_name == LITETRACKER_TRACKER:
         return track_with_litetracker(
@@ -604,6 +609,7 @@ def run_tracker_model(
             show_live_preview,
             freeze_lost_points,
             instrument_avoidance,
+            track_validation,
         )
     if tracker_name in {SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER}:
         return run_external_tracker(
@@ -668,6 +674,16 @@ with st.sidebar:
     frame_skip = st.slider("OpenCV frame step", 1, 10, 1)
     model_max_side = st.slider("Neural model max side", 256, 1024, 384, 64)
     freeze_lost_points = st.checkbox("Hide lost points and resume when visible", value=False)
+    reject_drift_points = st.checkbox("Reject border/jump drift", value=True)
+    track_validation: TrackValidationConfig | None = None
+    if reject_drift_points:
+        edge_margin_px = st.slider("Reject points within edge px", 0, 80, 8, 1)
+        max_jump_px = st.slider("Reject point jumps over px", 0, 300, 80, 5)
+        track_validation = TrackValidationConfig(
+            edge_margin=edge_margin_px,
+            max_jump_px=float(max_jump_px),
+        )
+        st.caption("Hides points that stick to the frame border or jump too far between frames.")
     avoid_instruments = st.checkbox("Avoid instruments with ONNX mask", value=False)
     instrument_avoidance: InstrumentAvoidanceConfig | None = None
     if avoid_instruments:
@@ -1011,6 +1027,7 @@ try:
                         show_live_preview,
                         freeze_lost_points,
                         instrument_avoidance,
+                        track_validation,
                     )
                 except RuntimeError as error:
                     error_message = format_tracker_error(error)
@@ -1153,6 +1170,7 @@ try:
                     show_live_preview,
                     freeze_lost_points,
                     instrument_avoidance,
+                    track_validation,
                 )
             except RuntimeError as error:
                 error_message = format_tracker_error(error)
