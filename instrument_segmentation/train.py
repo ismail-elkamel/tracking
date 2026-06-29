@@ -16,6 +16,7 @@ from instrument_segmentation.dataset import (
     split_samples,
 )
 from instrument_segmentation.models import build_model
+from instrument_segmentation.models import DEFAULT_MODEL
 from instrument_segmentation.export_onnx import export_checkpoint_to_onnx
 
 
@@ -138,7 +139,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train an instrument-only segmentation model.")
     parser.add_argument("--data-root", default="data/Instrument segmentation")
     parser.add_argument("--output-dir", default="instrument_segmentation/runs/instrument_model")
-    parser.add_argument("--model", default="deeplabv3plus_efficientnet_b4")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--image-size", type=int, default=512)
