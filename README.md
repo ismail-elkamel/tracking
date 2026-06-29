@@ -378,6 +378,28 @@ Controls:
 
 When a tracked point lands on the instrument mask, the app hides it and keeps its last valid non-instrument position internally. The point can appear again when the tracker predicts it outside the instrument mask.
 
+## Tracking Drift Filters
+
+If tracked points get stuck on the image border or jump suddenly, enable:
+
+```text
+Reject border/jump drift
+```
+
+Controls:
+
+- `Reject points within edge px`: hides points too close to the frame edge.
+- `Reject point jumps over px`: hides points that move too far from their last valid position in one step.
+
+For fast surgical motion, start with:
+
+```text
+Reject points within edge px = 8
+Reject point jumps over px = 80
+```
+
+If valid fast points disappear, increase the jump limit. If bad points still stick to the border, increase the edge margin.
+
 ## GPU Status
 
 Your NVIDIA driver is visible through `nvidia-smi`, but the old `track_env` PyTorch build was failing at CUDA initialization. I replaced the unusual `torch 2.12.0+cu130` build with the stable CUDA 12.8 PyTorch build. Recheck with:
