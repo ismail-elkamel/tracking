@@ -166,6 +166,42 @@ def comparison_video_path(test_dir: Path) -> Path:
     return test_dir / "comparison.mp4"
 
 
+def make_streamlit_preview_video(path: Path) -> Path:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return path
+
+    preview_path = path.with_name(f"{path.stem}_preview.mp4")
+    tmp_path = preview_path.with_suffix(".tmp.mp4")
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(path),
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "23",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        str(tmp_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        tmp_path.unlink(missing_ok=True)
+        return path
+    tmp_path.replace(preview_path)
+    return preview_path
+
+
 def timing_log_path(test_dir: Path) -> Path:
     test_dir.mkdir(parents=True, exist_ok=True)
     return test_dir / "model_timings.csv"
@@ -684,11 +720,13 @@ with st.sidebar:
     if reject_drift_points:
         edge_margin_px = st.slider("Reject points within edge px", 0, 120, 32, 1)
         max_jump_px = st.slider("Reject point jumps over px", 0, 300, 50, 5)
+        content_margin_px = st.slider("Reject points near content edge px", 0, 200, 48, 2)
         track_validation = TrackValidationConfig(
             edge_margin=edge_margin_px,
             max_jump_px=float(max_jump_px),
+            content_margin=content_margin_px,
         )
-        st.caption("Hides points that stick to the frame border or jump too far between frames.")
+        st.caption("Hides points that stick to frame/content borders or jump too far between frames.")
     default_instrument_onnx_path = Path("instrument_segmentation/runs/instrument_model/best.onnx")
     avoid_instruments = st.checkbox(
         "Avoid instruments with ONNX mask",
@@ -1128,10 +1166,12 @@ try:
                     "error": "",
                 },
             )
+            collage_preview_path = make_streamlit_preview_video(Path(collage_saved_path))
+            collage_preview_bytes = Path(collage_preview_path).read_bytes()
             collage_bytes = Path(collage_saved_path).read_bytes()
             timing_bytes = log_path.read_bytes() if log_path.exists() else b""
             status_placeholder.success("Comparison collage finished. Local working files will be removed.")
-            st.video(collage_bytes)
+            st.video(collage_preview_bytes)
             st.download_button(
                 "Download comparison collage",
                 data=collage_bytes,
@@ -1225,12 +1265,14 @@ try:
                         "error": "",
                     },
                 )
+                preview_path = make_streamlit_preview_video(Path(saved_path))
+                preview_bytes = Path(preview_path).read_bytes()
                 result_bytes = Path(saved_path).read_bytes()
                 timing_bytes = log_path.read_bytes() if log_path.exists() else b""
                 status_placeholder.success(
                     f"Tracking finished in {duration:.2f}s. Local working files will be removed."
                 )
-                st.video(result_bytes)
+                st.video(preview_bytes)
                 st.download_button(
                     "Download tracked video",
                     data=result_bytes,
