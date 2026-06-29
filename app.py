@@ -23,6 +23,7 @@ from tracking_methods import (
     COTRACKER_TRACKER,
     CPU_DEVICE,
     CUDA_DEVICE,
+    InstrumentAvoidanceConfig,
     LITETRACKER_TRACKER,
     MEDSAM2_TRACKER,
     OPENCV_TRACKER,
@@ -533,6 +534,7 @@ def run_tracker_model(
     status_placeholder,
     show_live_preview: bool,
     freeze_lost_points: bool,
+    instrument_avoidance: InstrumentAvoidanceConfig | None,
 ) -> Path | None:
     if tracker_name == OPENCV_TRACKER:
         return track_with_lk(
@@ -548,6 +550,7 @@ def run_tracker_model(
             result_path,
             show_live_preview,
             freeze_lost_points,
+            instrument_avoidance,
         )
     if tracker_name == COTRACKER_TRACKER:
         return track_with_cotracker3_online(
@@ -564,6 +567,7 @@ def run_tracker_model(
             result_path,
             show_live_preview,
             freeze_lost_points,
+            instrument_avoidance,
         )
     if tracker_name == COTRACKER_OFFLINE_TRACKER:
         return track_with_cotracker3_offline(
@@ -581,6 +585,7 @@ def run_tracker_model(
             show_live_preview,
             freeze_lost_points,
             cotracker_offline_chunk_frames,
+            instrument_avoidance,
         )
     if tracker_name == LITETRACKER_TRACKER:
         return track_with_litetracker(
@@ -598,6 +603,7 @@ def run_tracker_model(
             result_path,
             show_live_preview,
             freeze_lost_points,
+            instrument_avoidance,
         )
     if tracker_name in {SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER}:
         return run_external_tracker(
@@ -618,9 +624,9 @@ def run_tracker_model(
 st.set_page_config(page_title="Surgical Video Tracker", layout="wide")
 st.title("Surgical Video Tracker")
 
-if st.session_state.get("model_cache_version") != "local_neural_gpu_optional_v1":
+if st.session_state.get("model_cache_version") != "instrument_avoidance_v1":
     st.cache_resource.clear()
-    st.session_state["model_cache_version"] = "local_neural_gpu_optional_v1"
+    st.session_state["model_cache_version"] = "instrument_avoidance_v1"
 
 with st.sidebar:
     uploaded = st.file_uploader("Video", type=["mp4", "mov", "avi", "mkv"])
@@ -662,6 +668,25 @@ with st.sidebar:
     frame_skip = st.slider("OpenCV frame step", 1, 10, 1)
     model_max_side = st.slider("Neural model max side", 256, 1024, 384, 64)
     freeze_lost_points = st.checkbox("Hide lost points and resume when visible", value=False)
+    avoid_instruments = st.checkbox("Avoid instruments with ONNX mask", value=False)
+    instrument_avoidance: InstrumentAvoidanceConfig | None = None
+    if avoid_instruments:
+        instrument_onnx_path = st.text_input(
+            "Instrument ONNX model",
+            "instrument_segmentation/runs/instrument_model/best.onnx",
+        )
+        instrument_mask_size = st.slider("Instrument mask model size", 128, 1024, 512, 64)
+        instrument_threshold = st.slider("Instrument mask threshold", 0.05, 0.95, 0.40, 0.05)
+        instrument_dilation = st.slider("Instrument avoid margin px", 0, 40, 7, 1)
+        instrument_avoidance = InstrumentAvoidanceConfig(
+            onnx_path=instrument_onnx_path,
+            image_size=instrument_mask_size,
+            threshold=instrument_threshold,
+            dilation=instrument_dilation,
+        )
+        st.caption(
+            "Applies to OpenCV, CoTracker, and LiteTracker. Points on the instrument mask are hidden and resume when they leave it."
+        )
     show_live_preview = st.checkbox("Live preview while tracking/collage", value=False)
     st.caption("Uploads and outputs are temporary. Use the download buttons to keep results.")
 
@@ -985,6 +1010,7 @@ try:
                         status_placeholder,
                         show_live_preview,
                         freeze_lost_points,
+                        instrument_avoidance,
                     )
                 except RuntimeError as error:
                     error_message = format_tracker_error(error)
@@ -1126,6 +1152,7 @@ try:
                     status_placeholder,
                     show_live_preview,
                     freeze_lost_points,
+                    instrument_avoidance,
                 )
             except RuntimeError as error:
                 error_message = format_tracker_error(error)
