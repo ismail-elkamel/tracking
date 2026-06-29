@@ -391,14 +391,15 @@ Controls:
 - `Reject points within edge px`: hides points too close to the frame edge.
 - `Reject point jumps over px`: hides points that move too far from their last valid position in one step.
 
-For fast surgical motion, start with:
+Default conservative values:
 
 ```text
-Reject points within edge px = 8
-Reject point jumps over px = 80
+Hide lost points and resume when visible = on
+Reject points within edge px = 32
+Reject point jumps over px = 50
 ```
 
-If valid fast points disappear, increase the jump limit. If bad points still stick to the border, increase the edge margin.
+The point cloud also defaults to drawn rectangle/polygon areas, with a larger grid margin. This avoids filling the full frame with edge points. If valid fast points disappear, increase the jump limit. If bad points still stick to the border, increase the edge margin.
 
 ## GPU Status
 
