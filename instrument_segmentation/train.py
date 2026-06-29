@@ -16,6 +16,7 @@ from instrument_segmentation.dataset import (
     split_samples,
 )
 from instrument_segmentation.models import build_model
+from instrument_segmentation.export_onnx import export_checkpoint_to_onnx
 
 
 def dice_loss(logits: torch.Tensor, targets: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -152,6 +153,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visdom", action="store_true")
     parser.add_argument("--visdom-port", type=int, default=8097)
     parser.add_argument("--visdom-env", default="instrument_segmentation")
+    parser.add_argument("--export-onnx", action="store_true")
+    parser.add_argument("--onnx-output", default=None)
     return parser.parse_args()
 
 
@@ -240,7 +243,12 @@ def main() -> None:
             f"val_iou={val_metrics['iou']:.4f} time={elapsed:.1f}s"
         )
 
-    print(f"Best checkpoint: {output_dir / 'best.pt'}")
+    best_checkpoint = output_dir / "best.pt"
+    print(f"Best checkpoint: {best_checkpoint}")
+    if args.export_onnx:
+        onnx_output = Path(args.onnx_output) if args.onnx_output else output_dir / "best.onnx"
+        exported_path = export_checkpoint_to_onnx(best_checkpoint, onnx_output, device_name="cpu")
+        print(f"Best ONNX model: {exported_path}")
 
 
 if __name__ == "__main__":
