@@ -245,7 +245,8 @@ python -m instrument_segmentation.train \
   --epochs 50 \
   --batch-size 4 \
   --image-size 512 \
-  --visdom
+  --visdom \
+  --export-onnx
 ```
 
 The default validation split uses units `U61` and `U65`. To choose another validation set:
@@ -271,6 +272,7 @@ Checkpoints are written locally and ignored by Git:
 ```text
 instrument_segmentation/runs/instrument_model/best.pt
 instrument_segmentation/runs/instrument_model/last.pt
+instrument_segmentation/runs/instrument_model/best.onnx
 ```
 
 Preview a trained model on one image:
@@ -280,6 +282,25 @@ python -m instrument_segmentation.predict \
   --checkpoint instrument_segmentation/runs/instrument_model/best.pt \
   --image "data/Instrument segmentation/UT1/img/YOUR_IMAGE.png" \
   --output instrument_segmentation/runs/preview.png
+```
+
+Export an existing PyTorch checkpoint to ONNX:
+
+```bash
+python -m instrument_segmentation.export_onnx \
+  --checkpoint instrument_segmentation/runs/instrument_model/best.pt \
+  --output instrument_segmentation/runs/instrument_model/best.onnx
+```
+
+Test the ONNX model on a new image or a folder of images:
+
+```bash
+python -m instrument_segmentation.test_onnx \
+  --onnx instrument_segmentation/runs/instrument_model/best.onnx \
+  --input "data/Instrument segmentation/UT1/img" \
+  --output-dir instrument_segmentation/runs/onnx_predictions \
+  --image-size 512 \
+  --threshold 0.5
 ```
 
 ## GPU Status
