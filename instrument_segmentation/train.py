@@ -29,17 +29,64 @@ def dice_loss(logits: torch.Tensor, targets: torch.Tensor, eps: float = 1e-6) ->
     return 1.0 - dice.mean()
 
 
-def segmentation_metrics(logits: torch.Tensor, targets: torch.Tensor, eps: float = 1e-6) -> tuple[float, float]:
+def focal_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    alpha: float = 0.75,
+    gamma: float = 2.0,
+) -> torch.Tensor:
+    bce = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    probs = torch.sigmoid(logits)
+    pt = probs * targets + (1.0 - probs) * (1.0 - targets)
+    alpha_t = alpha * targets + (1.0 - alpha) * (1.0 - targets)
+    return (alpha_t * (1.0 - pt).pow(gamma) * bce).mean()
+
+
+def tversky_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    alpha: float = 0.3,
+    beta: float = 0.7,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    probs = torch.sigmoid(logits)
+    dims = (1, 2, 3)
+    tp = (probs * targets).sum(dim=dims)
+    fp = (probs * (1.0 - targets)).sum(dim=dims)
+    fn = ((1.0 - probs) * targets).sum(dim=dims)
+    tversky = (tp + eps) / (tp + alpha * fp + beta * fn + eps)
+    return 1.0 - tversky.mean()
+
+
+def build_loss(loss_name: str):
+    if loss_name == "tversky_focal":
+        return lambda logits, targets: tversky_loss(logits, targets) + focal_loss(logits, targets)
+    if loss_name == "dice_focal":
+        return lambda logits, targets: dice_loss(logits, targets) + focal_loss(logits, targets)
+    if loss_name == "dice_bce":
+        bce = nn.BCEWithLogitsLoss()
+        return lambda logits, targets: dice_loss(logits, targets) + bce(logits, targets)
+    raise ValueError("Unknown loss. Use one of: tversky_focal, dice_focal, dice_bce.")
+
+
+def confusion_counts(logits: torch.Tensor, targets: torch.Tensor) -> tuple[int, int, int, int]:
     preds = torch.sigmoid(logits) > 0.5
     targets_bool = targets > 0.5
-    dims = (1, 2, 3)
-    intersection = (preds & targets_bool).sum(dim=dims).float()
-    union = (preds | targets_bool).sum(dim=dims).float()
-    pred_sum = preds.sum(dim=dims).float()
-    target_sum = targets_bool.sum(dim=dims).float()
-    iou = ((intersection + eps) / (union + eps)).mean().item()
-    dice = ((2.0 * intersection + eps) / (pred_sum + target_sum + eps)).mean().item()
-    return dice, iou
+    tp = int((preds & targets_bool).sum().item())
+    fp = int((preds & ~targets_bool).sum().item())
+    fn = int((~preds & targets_bool).sum().item())
+    tn = int((~preds & ~targets_bool).sum().item())
+    return tp, fp, fn, tn
+
+
+def metrics_from_counts(tp: int, fp: int, fn: int, tn: int, eps: float = 1e-6) -> dict[str, float]:
+    return {
+        "dice": (2.0 * tp + eps) / (2.0 * tp + fp + fn + eps),
+        "iou": (tp + eps) / (tp + fp + fn + eps),
+        "precision": (tp + eps) / (tp + fp + eps),
+        "recall": (tp + eps) / (tp + fn + eps),
+        "specificity": (tn + eps) / (tn + fp + eps),
+    }
 
 
 class VisdomLogger:
@@ -88,14 +135,13 @@ def run_epoch(
     device: torch.device,
     scaler: GradScaler,
     use_amp: bool,
+    loss_fn,
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
-    bce = nn.BCEWithLogitsLoss()
 
     total_loss = 0.0
-    total_dice = 0.0
-    total_iou = 0.0
+    tp = fp = fn = tn = 0
     batches = 0
 
     progress = tqdm(loader, leave=False, desc="train" if training else "val")
@@ -113,7 +159,7 @@ def run_epoch(
                         mode="bilinear",
                         align_corners=False,
                     )
-                loss = bce(logits, masks) + dice_loss(logits, masks)
+                loss = loss_fn(logits, masks)
 
             if training:
                 optimizer.zero_grad(set_to_none=True)
@@ -121,18 +167,24 @@ def run_epoch(
                 scaler.step(optimizer)
                 scaler.update()
 
-        dice, iou = segmentation_metrics(logits.detach(), masks)
+        batch_tp, batch_fp, batch_fn, batch_tn = confusion_counts(logits.detach(), masks)
+        tp += batch_tp
+        fp += batch_fp
+        fn += batch_fn
+        tn += batch_tn
         total_loss += loss.item()
-        total_dice += dice
-        total_iou += iou
         batches += 1
-        progress.set_postfix(loss=total_loss / batches, dice=total_dice / batches, iou=total_iou / batches)
+        metrics = metrics_from_counts(tp, fp, fn, tn)
+        progress.set_postfix(
+            loss=total_loss / batches,
+            dice=metrics["dice"],
+            iou=metrics["iou"],
+            recall=metrics["recall"],
+        )
 
-    return {
-        "loss": total_loss / max(1, batches),
-        "dice": total_dice / max(1, batches),
-        "iou": total_iou / max(1, batches),
-    }
+    metrics = metrics_from_counts(tp, fp, fn, tn)
+    metrics["loss"] = total_loss / max(1, batches)
+    return metrics
 
 
 def parse_args() -> argparse.Namespace:
@@ -144,6 +196,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument(
+        "--loss",
+        choices=["tversky_focal", "dice_focal", "dice_bce"],
+        default="tversky_focal",
+    )
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val-ratio", type=float, default=0.15)
@@ -210,21 +267,27 @@ def main() -> None:
     use_amp = device.type == "cuda" and not args.no_amp
     scaler = GradScaler(device.type, enabled=use_amp)
     visdom_logger = VisdomLogger(args.visdom, env=args.visdom_env, port=args.visdom_port)
+    loss_fn = build_loss(args.loss)
+    print(f"Model: {args.model}")
+    print(f"Loss: {args.loss}")
 
     best_iou = -1.0
     for epoch in range(1, args.epochs + 1):
         start = time.time()
-        train_metrics = run_epoch(model, train_loader, optimizer, device, scaler, use_amp)
-        val_metrics = run_epoch(model, val_loader, None, device, scaler, use_amp)
+        train_metrics = run_epoch(model, train_loader, optimizer, device, scaler, use_amp, loss_fn)
+        val_metrics = run_epoch(model, val_loader, None, device, scaler, use_amp, loss_fn)
         scheduler.step()
 
         visdom_logger.plot("loss", epoch, train_metrics["loss"], val_metrics["loss"])
         visdom_logger.plot("dice", epoch, train_metrics["dice"], val_metrics["dice"])
         visdom_logger.plot("iou", epoch, train_metrics["iou"], val_metrics["iou"])
+        visdom_logger.plot("recall", epoch, train_metrics["recall"], val_metrics["recall"])
+        visdom_logger.plot("precision", epoch, train_metrics["precision"], val_metrics["precision"])
 
         checkpoint = {
             "epoch": epoch,
             "model": args.model,
+            "loss": args.loss,
             "image_size": args.image_size,
             "state_dict": model.state_dict(),
             "optimizer": optimizer.state_dict(),
@@ -241,7 +304,8 @@ def main() -> None:
             f"epoch {epoch:03d}/{args.epochs} "
             f"train_loss={train_metrics['loss']:.4f} train_dice={train_metrics['dice']:.4f} "
             f"val_loss={val_metrics['loss']:.4f} val_dice={val_metrics['dice']:.4f} "
-            f"val_iou={val_metrics['iou']:.4f} time={elapsed:.1f}s"
+            f"val_iou={val_metrics['iou']:.4f} val_precision={val_metrics['precision']:.4f} "
+            f"val_recall={val_metrics['recall']:.4f} time={elapsed:.1f}s"
         )
 
     best_checkpoint = output_dir / "best.pt"
