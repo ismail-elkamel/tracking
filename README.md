@@ -234,14 +234,14 @@ Open:
 http://localhost:8097
 ```
 
-Train the default high-quality model, `DeepLabV3+` with an ImageNet-pretrained EfficientNet-B4 encoder:
+Train the default model, `UNet` with an ImageNet-pretrained EfficientNet-B4 encoder:
 
 ```bash
 conda activate track_env
 python -m instrument_segmentation.train \
   --data-root "data/Instrument segmentation" \
   --output-dir instrument_segmentation/runs/instrument_model \
-  --model deeplabv3plus_efficientnet_b4 \
+  --model unet_efficientnet_b4 \
   --epochs 50 \
   --batch-size 4 \
   --image-size 512 \
@@ -255,16 +255,13 @@ The default validation split uses units `U61` and `U65`. To choose another valid
 python -m instrument_segmentation.train --val-units UT8 UT9 --visdom
 ```
 
-For a quick smoke test before the full run:
+Available model names:
 
-```bash
-python -m instrument_segmentation.train \
-  --epochs 1 \
-  --batch-size 2 \
-  --image-size 128 \
-  --num-workers 0 \
-  --max-train-samples 4 \
-  --max-val-samples 2
+```text
+unet_efficientnet_b4
+unetplusplus_efficientnet_b4
+deeplabv3plus_efficientnet_b4
+torchvision_deeplabv3_resnet50
 ```
 
 Checkpoints are written locally and ignored by Git:
@@ -273,6 +270,22 @@ Checkpoints are written locally and ignored by Git:
 instrument_segmentation/runs/instrument_model/best.pt
 instrument_segmentation/runs/instrument_model/last.pt
 instrument_segmentation/runs/instrument_model/best.onnx
+```
+
+The `runs/` folder is only local output:
+
+- `best.pt`: best PyTorch checkpoint from training.
+- `last.pt`: latest PyTorch checkpoint from training.
+- `best.onnx`: exported model for integration/inference outside PyTorch.
+- `best.onnx.data`: extra ONNX weight data that PyTorch may create for larger models. Keep it next to `best.onnx`; it belongs to the ONNX model.
+- `onnx_predictions/`: image overlays from `test_onnx.py`.
+- `*_instrument_overlay.mp4`: video with red instrument overlay.
+- `*_instrument_mask.mp4`: optional black/white mask video.
+
+If you want a clean folder before a serious run:
+
+```bash
+rm -rf instrument_segmentation/runs/instrument_model
 ```
 
 Preview a trained model on one image:
