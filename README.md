@@ -242,6 +242,7 @@ python -m instrument_segmentation.train \
   --data-root "data/Instrument segmentation" \
   --output-dir instrument_segmentation/runs/instrument_model \
   --model unet_efficientnet_b4 \
+  --loss tversky_focal \
   --epochs 50 \
   --batch-size 4 \
   --image-size 512 \
@@ -263,6 +264,16 @@ unetplusplus_efficientnet_b4
 deeplabv3plus_efficientnet_b4
 torchvision_deeplabv3_resnet50
 ```
+
+Available losses:
+
+```text
+tversky_focal
+dice_focal
+dice_bce
+```
+
+The default `tversky_focal` is chosen for instrument avoidance because it gives more weight to missing instrument pixels. The terminal prints epoch-level `dice`, `iou`, `precision`, and `recall`; for this project, watch `val_recall` closely because low recall means the mask is missing instrument areas.
 
 Checkpoints are written locally and ignored by Git:
 
