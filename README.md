@@ -212,7 +212,7 @@ Only annotation objects with:
 classTitle == "Instrument"
 ```
 
-are used as positive pixels. Kidney, tumor, vessel, spleen, cavity, ROI, and all other labels are ignored and treated as background.
+are used as positive pixels. Kidney, tumor, vessel, spleen, cavity, ROI, and all other labels are ignored and treated as background. Images with no `Instrument` annotation are skipped by default.
 
 Install the extra training dependencies:
 
@@ -263,6 +263,12 @@ test  = UT8 UT9
 ```
 
 Use validation to choose the model/loss/threshold. Use test only for final performance after choosing settings.
+
+If you want to keep images that have no instrument at all as empty masks, add:
+
+```bash
+--keep-empty-samples
+```
 
 To choose different validation or test videos:
 
