@@ -201,12 +201,52 @@ def write_prompt_file(
     return path
 
 
+def draw_obj_mesh(output: np.ndarray, points: np.ndarray) -> np.ndarray:
+    if len(points) < 3:
+        return output
+
+    height, width = output.shape[:2]
+    pts = np.round(points).astype(np.int32)
+    in_frame = (
+        (pts[:, 0] >= 0)
+        & (pts[:, 0] < width)
+        & (pts[:, 1] >= 0)
+        & (pts[:, 1] < height)
+    )
+    pts = pts[in_frame]
+    if len(pts) < 3:
+        return output
+
+    overlay = output.copy()
+    mask = np.zeros((height, width), dtype=np.uint8)
+    hull = cv2.convexHull(pts)
+    cv2.fillConvexPoly(overlay, hull, (60, 220, 255), lineType=cv2.LINE_AA)
+    cv2.fillConvexPoly(mask, hull, 255, lineType=cv2.LINE_AA)
+
+    step = max(1, len(pts) // 350)
+    wire_points = pts[::step]
+    if len(wire_points) >= 3:
+        subdiv = cv2.Subdiv2D((0, 0, width, height))
+        for point in wire_points:
+            try:
+                subdiv.insert((float(point[0]), float(point[1])))
+            except cv2.error:
+                continue
+        for x1, y1, x2, y2, x3, y3 in subdiv.getTriangleList():
+            triangle = np.array([[x1, y1], [x2, y2], [x3, y3]], dtype=np.int32)
+            if np.all((triangle[:, 0] >= 0) & (triangle[:, 0] < width) & (triangle[:, 1] >= 0) & (triangle[:, 1] < height)):
+                cv2.polylines(overlay, [triangle], True, (60, 220, 255), 1, lineType=cv2.LINE_AA)
+
+    blended = cv2.addWeighted(overlay, 0.5, output, 0.5, 0)
+    output[mask > 0] = blended[mask > 0]
+    for point in pts[:: max(1, len(pts) // 220)]:
+        cv2.circle(output, tuple(point), 4, (20, 20, 20), -1, lineType=cv2.LINE_AA)
+        cv2.circle(output, tuple(point), 2, (245, 255, 61), -1, lineType=cv2.LINE_AA)
+    return output
+
+
 def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[str]) -> np.ndarray:
     output = frame_rgb.copy()
-    obj_overlay = frame_rgb.copy()
-    obj_mask = np.zeros(frame_rgb.shape[:2], dtype=np.uint8)
-    obj_points: list[tuple[int, int]] = []
-    has_obj_overlay = False
     colors = [
         (255, 72, 92),
         (28, 167, 236),
@@ -217,19 +257,16 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
     ]
 
     for index, points in enumerate(tracks):
+        label = labels[index] if index < len(labels) else f"annotation {index + 1}"
+        if label.startswith("obj "):
+            output = draw_obj_mesh(output, points)
+
+    for index, points in enumerate(tracks):
         color = colors[index % len(colors)]
         label = labels[index] if index < len(labels) else f"annotation {index + 1}"
-        is_obj_track = label.startswith("obj ")
-        pts = np.round(points).astype(int)
-        if is_obj_track:
-            if len(pts) >= 3:
-                cv2.fillPoly(obj_overlay, [pts], (60, 220, 255), lineType=cv2.LINE_AA)
-                cv2.fillPoly(obj_mask, [pts], 255, lineType=cv2.LINE_AA)
-                cv2.polylines(obj_overlay, [pts], True, (60, 220, 255), 1, lineType=cv2.LINE_AA)
-                for point in pts:
-                    obj_points.append((int(point[0]), int(point[1])))
-                has_obj_overlay = True
+        if label.startswith("obj "):
             continue
+        pts = np.round(points).astype(int)
         if len(pts) == 1:
             cv2.circle(output, tuple(pts[0]), 7, color, -1, lineType=cv2.LINE_AA)
             cv2.circle(output, tuple(pts[0]), 11, (255, 255, 255), 2, lineType=cv2.LINE_AA)
@@ -250,26 +287,6 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
                 2,
                 cv2.LINE_AA,
             )
-    if has_obj_overlay:
-        blended = cv2.addWeighted(obj_overlay, 0.5, output, 0.5, 0)
-        output[obj_mask > 0] = blended[obj_mask > 0]
-        for point in obj_points[:: max(1, len(obj_points) // 220)]:
-            cv2.circle(output, point, 4, (20, 20, 20), -1, lineType=cv2.LINE_AA)
-            cv2.circle(output, point, 2, (245, 255, 61), -1, lineType=cv2.LINE_AA)
-
-        for index, points in enumerate(tracks):
-            label = labels[index] if index < len(labels) else f"annotation {index + 1}"
-            if label.startswith("obj "):
-                continue
-            pts = np.round(points).astype(int)
-            color = colors[index % len(colors)]
-            if len(pts) == 1:
-                cv2.circle(output, tuple(pts[0]), 7, color, -1, lineType=cv2.LINE_AA)
-                cv2.circle(output, tuple(pts[0]), 11, (255, 255, 255), 2, lineType=cv2.LINE_AA)
-            elif len(pts) > 1:
-                cv2.polylines(output, [pts], len(pts) >= 3, color, 3, lineType=cv2.LINE_AA)
-                for point in pts:
-                    cv2.circle(output, tuple(point), 5, color, -1, lineType=cv2.LINE_AA)
     return output
 
 
