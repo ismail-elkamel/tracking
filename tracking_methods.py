@@ -224,7 +224,7 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
             for point in pts:
                 cv2.circle(output, tuple(point), 5, color, -1, lineType=cv2.LINE_AA)
         label = labels[index] if index < len(labels) else f"annotation {index + 1}"
-        if len(pts) and label and not label.startswith("grid "):
+        if len(pts) and label and not label.startswith(("grid ", "obj ")):
             x, y = pts[0]
             cv2.putText(
                 output,
