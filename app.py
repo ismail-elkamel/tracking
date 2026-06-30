@@ -216,22 +216,43 @@ def obj_tracks_from_projection(
     return tracks, labels
 
 
-def obj_control_box_drawing(width: int, height: int) -> dict[str, Any]:
-    box_size = max(60, min(width, height) // 3)
+def obj_wireframe_drawing(points_xy: np.ndarray, faces: list[list[int]], max_edges: int = 1600) -> dict[str, Any]:
+    path: list[list[float | str]] = []
+    seen_edges: set[tuple[int, int]] = set()
+    for face in faces:
+        valid_face = [index for index in face if 0 <= index < len(points_xy)]
+        if len(valid_face) < 2:
+            continue
+        for start, end in zip(valid_face, valid_face[1:] + valid_face[:1]):
+            edge = tuple(sorted((start, end)))
+            if edge in seen_edges:
+                continue
+            seen_edges.add(edge)
+            x0, y0 = points_xy[start]
+            x1, y1 = points_xy[end]
+            path.append(["M", float(x0), float(y0)])
+            path.append(["L", float(x1), float(y1)])
+            if len(seen_edges) >= max_edges:
+                break
+        if len(seen_edges) >= max_edges:
+            break
+
+    if not path:
+        for point in points_xy[:: max(1, len(points_xy) // 200)]:
+            x, y = point
+            path.append(["M", float(x - 2), float(y)])
+            path.append(["L", float(x + 2), float(y)])
+
     return {
         "version": "4.4.0",
         "objects": [
             {
-                "type": "rect",
-                "left": (width - box_size) / 2,
-                "top": (height - box_size) / 2,
-                "width": box_size,
-                "height": box_size,
-                "scaleX": 1,
-                "scaleY": 1,
-                "fill": "rgba(60, 220, 255, 0.08)",
+                "type": "path",
+                "name": "obj_model_overlay",
+                "path": path,
+                "fill": "",
                 "stroke": "#3cdcff",
-                "strokeWidth": 3,
+                "strokeWidth": 2,
                 "transparentCorners": False,
                 "cornerColor": "#3cdcff",
             }
@@ -249,7 +270,7 @@ def obj_placement_from_canvas(
     if not json_data:
         return frame_width / 2.0, frame_height / 2.0, default_scale
     for obj in json_data.get("objects", []):
-        if obj.get("type") != "rect":
+        if obj.get("name") != "obj_model_overlay" and obj.get("type") not in {"rect", "path", "polygon"}:
             continue
         left = float(obj.get("left", 0.0))
         top = float(obj.get("top", 0.0))
@@ -1088,6 +1109,7 @@ try:
     obj_faces: list[list[int]] = []
     obj_track_count = 0
     obj_overlay_enabled = uploaded_obj is not None
+    obj_use_main_canvas = False
     obj_max_points = 80
     if uploaded_obj is not None:
         try:
@@ -1098,31 +1120,8 @@ try:
             obj_vertices = np.empty((0, 3), dtype=np.float32)
         if obj_overlay_enabled:
             with st.expander("3D model placement", expanded=True):
-                use_mouse_obj_placement = st.checkbox("Move/zoom 3D model with mouse", value=True)
-                if use_mouse_obj_placement:
-                    placement_frame, placement_scale = resize_for_canvas(frame_rgb)
-                    placement_height, placement_width = placement_frame.shape[:2]
-                    placement_result = st_canvas(
-                        fill_color="rgba(60, 220, 255, 0.08)",
-                        stroke_width=3,
-                        stroke_color="#3cdcff",
-                        background_image=Image.fromarray(placement_frame),
-                        update_streamlit=True,
-                        height=placement_height,
-                        width=placement_width,
-                        drawing_mode="transform",
-                        initial_drawing=obj_control_box_drawing(placement_width, placement_height),
-                        display_toolbar=False,
-                        key=f"obj_placement_{video_path.name}_{frame_index}_{uploaded_obj.name}",
-                    )
-                    obj_center_x, obj_center_y, obj_scale = obj_placement_from_canvas(
-                        placement_result.json_data,
-                        placement_scale,
-                        frame_width,
-                        frame_height,
-                    )
-                    st.caption("Move the blue box to translate the model. Resize it to zoom.")
-                else:
+                obj_use_main_canvas = st.checkbox("Control 3D model in Select points canvas", value=True)
+                if not obj_use_main_canvas:
                     col_a, col_b, col_c = st.columns(3)
                     with col_a:
                         obj_center_x = st.slider("3D model X", 0, frame_width, frame_width // 2, 1)
@@ -1136,6 +1135,10 @@ try:
                             max(40, min(frame_width, frame_height) // 4),
                             5,
                         )
+                else:
+                    obj_center_x = frame_width / 2
+                    obj_center_y = frame_height / 2
+                    obj_scale = max(40, min(frame_width, frame_height) // 4)
                 rot_a, rot_b, rot_c = st.columns(3)
                 with rot_a:
                     obj_rotate_x = st.slider("Rotate X", -180, 180, 0, 1)
@@ -1145,30 +1148,51 @@ try:
                     obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
                 obj_max_points = st.slider("3D model tracking points", 5, 500, 80, 5)
                 st.caption(
-                    "This is a 2D orthographic projection of the OBJ. The generated points are tracked like normal points."
+                    "When canvas control is enabled, drag the wireframe model itself to translate it and resize it to zoom."
                 )
-            obj_projected_points = project_obj_vertices(
-                obj_vertices,
-                frame_width,
-                frame_height,
-                obj_center_x,
-                obj_center_y,
-                obj_scale,
-                obj_rotate_x,
-                obj_rotate_y,
-                obj_rotate_z,
-            )
+            if not obj_use_main_canvas:
+                obj_projected_points = project_obj_vertices(
+                    obj_vertices,
+                    frame_width,
+                    frame_height,
+                    obj_center_x,
+                    obj_center_y,
+                    obj_scale,
+                    obj_rotate_x,
+                    obj_rotate_y,
+                    obj_rotate_z,
+                )
 
     canvas_background = frame_rgb
-    if obj_overlay_enabled and obj_projected_points is not None:
+    if obj_overlay_enabled and obj_projected_points is not None and not obj_use_main_canvas:
         canvas_background = draw_obj_overlay(frame_rgb, obj_projected_points, obj_faces)
 
     display_frame, canvas_scale = resize_for_canvas(canvas_background)
     height, width = display_frame.shape[:2]
+    initial_drawing = None
+    canvas_mode = mode
+    canvas_key_mode = mode
+    if obj_overlay_enabled and obj_use_main_canvas:
+        initial_obj_points = project_obj_vertices(
+            obj_vertices,
+            width,
+            height,
+            width / 2,
+            height / 2,
+            max(40, min(width, height) // 4),
+            obj_rotate_x,
+            obj_rotate_y,
+            obj_rotate_z,
+        )
+        initial_drawing = obj_wireframe_drawing(initial_obj_points, obj_faces)
+        canvas_mode = "transform"
+        canvas_key_mode = f"obj_transform_{obj_rotate_x}_{obj_rotate_y}_{obj_rotate_z}"
 
     left, right = st.columns([1, 1], gap="large")
     with left:
         st.subheader("Select points or regions")
+        if obj_overlay_enabled and obj_use_main_canvas:
+            st.caption("Drag the 3D wireframe to translate it. Resize it to zoom. Disable canvas control to draw manual annotations.")
         canvas_result = st_canvas(
             fill_color="rgba(255, 72, 92, 0.20)",
             stroke_width=stroke_width,
@@ -1177,13 +1201,34 @@ try:
             update_streamlit=True,
             height=height,
             width=width,
-            drawing_mode=mode,
+            drawing_mode=canvas_mode,
+            initial_drawing=initial_drawing,
             point_display_radius=6,
             display_toolbar=True,
-            key=f"canvas_{video_path.name}_{frame_index}_{mode}",
+            key=f"canvas_{video_path.name}_{frame_index}_{canvas_key_mode}",
         )
 
-    tracks, labels = parse_annotations(canvas_result.json_data, canvas_scale)
+    if obj_overlay_enabled and obj_use_main_canvas:
+        obj_center_x, obj_center_y, obj_scale = obj_placement_from_canvas(
+            canvas_result.json_data,
+            canvas_scale,
+            frame_width,
+            frame_height,
+        )
+        obj_projected_points = project_obj_vertices(
+            obj_vertices,
+            frame_width,
+            frame_height,
+            obj_center_x,
+            obj_center_y,
+            obj_scale,
+            obj_rotate_x,
+            obj_rotate_y,
+            obj_rotate_z,
+        )
+        tracks, labels = [], []
+    else:
+        tracks, labels = parse_annotations(canvas_result.json_data, canvas_scale)
     manual_point_count = sum(len(track) for track in tracks)
     if obj_overlay_enabled and obj_projected_points is not None:
         obj_tracks, obj_labels = obj_tracks_from_projection(
