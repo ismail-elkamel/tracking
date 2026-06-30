@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import importlib
+import math
 import shutil
 import subprocess
 import tempfile
@@ -92,6 +93,127 @@ TRACKER_OPTIONS = [
     SAM3_TRACKER,
     MEDSAM2_TRACKER,
 ]
+
+
+def parse_obj_model(obj_bytes: bytes) -> tuple[np.ndarray, list[list[int]]]:
+    vertices: list[list[float]] = []
+    faces: list[list[int]] = []
+    text = obj_bytes.decode("utf-8", errors="ignore")
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if parts[0] == "v" and len(parts) >= 4:
+            try:
+                vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+            except ValueError:
+                continue
+        elif parts[0] == "f" and len(parts) >= 4:
+            face: list[int] = []
+            for token in parts[1:]:
+                index_text = token.split("/")[0]
+                if not index_text:
+                    continue
+                try:
+                    index = int(index_text)
+                except ValueError:
+                    continue
+                if index < 0:
+                    index = len(vertices) + index
+                else:
+                    index -= 1
+                if index >= 0:
+                    face.append(index)
+            if len(face) >= 3:
+                faces.append(face)
+    if not vertices:
+        raise RuntimeError("The OBJ file does not contain any vertices.")
+    return np.asarray(vertices, dtype=np.float32), faces
+
+
+def normalize_obj_vertices(vertices: np.ndarray) -> np.ndarray:
+    centered = vertices - vertices.mean(axis=0, keepdims=True)
+    radius = float(np.linalg.norm(centered, axis=1).max())
+    if radius <= 0.0:
+        return centered
+    return centered / radius
+
+
+def rotation_matrix_xyz(rx_deg: float, ry_deg: float, rz_deg: float) -> np.ndarray:
+    rx, ry, rz = (math.radians(value) for value in (rx_deg, ry_deg, rz_deg))
+    cx, sx = math.cos(rx), math.sin(rx)
+    cy, sy = math.cos(ry), math.sin(ry)
+    cz, sz = math.cos(rz), math.sin(rz)
+    rot_x = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]], dtype=np.float32)
+    rot_y = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], dtype=np.float32)
+    rot_z = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]], dtype=np.float32)
+    return rot_z @ rot_y @ rot_x
+
+
+def project_obj_vertices(
+    vertices: np.ndarray,
+    frame_width: int,
+    frame_height: int,
+    center_x: float,
+    center_y: float,
+    scale_px: float,
+    rotate_x: float,
+    rotate_y: float,
+    rotate_z: float,
+) -> np.ndarray:
+    normalized = normalize_obj_vertices(vertices)
+    rotated = normalized @ rotation_matrix_xyz(rotate_x, rotate_y, rotate_z).T
+    projected = np.empty((len(rotated), 2), dtype=np.float32)
+    projected[:, 0] = float(center_x) + rotated[:, 0] * float(scale_px)
+    projected[:, 1] = float(center_y) - rotated[:, 1] * float(scale_px)
+    projected[:, 0] = np.clip(projected[:, 0], -frame_width, frame_width * 2)
+    projected[:, 1] = np.clip(projected[:, 1], -frame_height, frame_height * 2)
+    return projected
+
+
+def draw_obj_overlay(
+    frame_rgb: np.ndarray,
+    points_xy: np.ndarray,
+    faces: list[list[int]],
+    color: tuple[int, int, int] = (60, 220, 255),
+) -> np.ndarray:
+    output = frame_rgb.copy()
+    if not len(points_xy):
+        return output
+    for face in faces[:8000]:
+        valid_face = [index for index in face if 0 <= index < len(points_xy)]
+        if len(valid_face) < 2:
+            continue
+        pts = np.round(points_xy[valid_face]).astype(np.int32)
+        cv2.polylines(output, [pts], True, color, 1, lineType=cv2.LINE_AA)
+    for point in np.round(points_xy[:: max(1, len(points_xy) // 120)]).astype(np.int32):
+        cv2.circle(output, tuple(point), 2, color, -1, lineType=cv2.LINE_AA)
+    return output
+
+
+def obj_tracks_from_projection(
+    points_xy: np.ndarray,
+    frame_width: int,
+    frame_height: int,
+    max_points: int,
+) -> tuple[list[np.ndarray], list[str]]:
+    if max_points <= 0 or len(points_xy) == 0:
+        return [], []
+    in_frame = (
+        (points_xy[:, 0] >= 0)
+        & (points_xy[:, 0] < frame_width)
+        & (points_xy[:, 1] >= 0)
+        & (points_xy[:, 1] < frame_height)
+    )
+    visible_points = points_xy[in_frame]
+    if len(visible_points) == 0:
+        return [], []
+    step = max(1, int(math.ceil(len(visible_points) / max_points)))
+    selected = visible_points[::step][:max_points].astype(np.float32)
+    tracks = [point.reshape(1, 2) for point in selected]
+    labels = [f"obj {index}" for index in range(1, len(tracks) + 1)]
+    return tracks, labels
 
 
 def cleanup_path(path: Path) -> None:
@@ -676,6 +798,7 @@ if st.session_state.get("model_cache_version") != "instrument_avoidance_v1":
 
 with st.sidebar:
     uploaded = st.file_uploader("Video", type=["mp4", "mov", "avi", "mkv"])
+    uploaded_obj = st.file_uploader("3D model overlay (.obj)", type=["obj"])
     mode = st.radio("Annotation", ["point", "rect", "polygon"], horizontal=True)
     stroke_width = st.slider("Line width", 1, 8, 3)
     stroke_color = st.color_picker("Color", "#ff485c")
@@ -914,7 +1037,58 @@ try:
     st.session_state["frame_index"] = frame_index
 
     frame_rgb = read_frame(str(video_path), frame_index)
-    display_frame, canvas_scale = resize_for_canvas(frame_rgb)
+    frame_height, frame_width = frame_rgb.shape[:2]
+    obj_projected_points: np.ndarray | None = None
+    obj_faces: list[list[int]] = []
+    obj_track_count = 0
+    obj_overlay_enabled = uploaded_obj is not None
+    obj_max_points = 80
+    if uploaded_obj is not None:
+        try:
+            obj_vertices, obj_faces = parse_obj_model(uploaded_obj.getvalue())
+        except RuntimeError as error:
+            st.error(str(error))
+            obj_overlay_enabled = False
+            obj_vertices = np.empty((0, 3), dtype=np.float32)
+        if obj_overlay_enabled:
+            with st.expander("3D model placement", expanded=True):
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    obj_center_x = st.slider("3D model X", 0, frame_width, frame_width // 2, 1)
+                    obj_rotate_x = st.slider("Rotate X", -180, 180, 0, 1)
+                with col_b:
+                    obj_center_y = st.slider("3D model Y", 0, frame_height, frame_height // 2, 1)
+                    obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
+                with col_c:
+                    obj_scale = st.slider(
+                        "3D model scale px",
+                        10,
+                        max(20, max(frame_width, frame_height)),
+                        max(40, min(frame_width, frame_height) // 4),
+                        5,
+                    )
+                    obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
+                obj_max_points = st.slider("3D model tracking points", 5, 500, 80, 5)
+                st.caption(
+                    "This is a 2D orthographic projection of the OBJ. The generated points are tracked like normal points."
+                )
+            obj_projected_points = project_obj_vertices(
+                obj_vertices,
+                frame_width,
+                frame_height,
+                obj_center_x,
+                obj_center_y,
+                obj_scale,
+                obj_rotate_x,
+                obj_rotate_y,
+                obj_rotate_z,
+            )
+
+    canvas_background = frame_rgb
+    if obj_overlay_enabled and obj_projected_points is not None:
+        canvas_background = draw_obj_overlay(frame_rgb, obj_projected_points, obj_faces)
+
+    display_frame, canvas_scale = resize_for_canvas(canvas_background)
     height, width = display_frame.shape[:2]
 
     left, right = st.columns([1, 1], gap="large")
@@ -936,6 +1110,16 @@ try:
 
     tracks, labels = parse_annotations(canvas_result.json_data, canvas_scale)
     manual_point_count = sum(len(track) for track in tracks)
+    if obj_overlay_enabled and obj_projected_points is not None:
+        obj_tracks, obj_labels = obj_tracks_from_projection(
+            obj_projected_points,
+            frame_width,
+            frame_height,
+            obj_max_points,
+        )
+        obj_track_count = len(obj_tracks)
+        tracks.extend(obj_tracks)
+        labels.extend(obj_labels)
     grid_point_count = 0
     if add_point_cloud:
         frame_height, frame_width = frame_rgb.shape[:2]
@@ -962,9 +1146,13 @@ try:
     with right:
         st.subheader("Preview")
         if tracks:
-            st.image(draw_tracks(frame_rgb, tracks, labels), channels="RGB", use_container_width=True)
+            preview_frame = frame_rgb
+            if obj_overlay_enabled and obj_projected_points is not None:
+                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
+            st.image(draw_tracks(preview_frame, tracks, labels), channels="RGB", use_container_width=True)
             st.caption(
-                f"{manual_point_count} manual point(s), {grid_point_count} grid point(s), "
+                f"{manual_point_count} manual point(s), {obj_track_count} 3D model point(s), "
+                f"{grid_point_count} grid point(s), "
                 f"{sum(len(track) for track in tracks)} total tracked point(s)"
             )
             total_point_count = sum(len(track) for track in tracks)
@@ -975,7 +1163,10 @@ try:
                     "Fast point cloud, fewer max points, larger spacing, or OpenCV Lucas-Kanade."
                 )
         else:
-            st.image(frame_rgb, channels="RGB", use_container_width=True)
+            preview_frame = frame_rgb
+            if obj_overlay_enabled and obj_projected_points is not None:
+                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
+            st.image(preview_frame, channels="RGB", use_container_width=True)
             st.caption("Draw points, rectangles, or polygons on the left.")
 
         if compare_mode:
