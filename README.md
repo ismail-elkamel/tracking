@@ -7,6 +7,7 @@ A small Streamlit prototype for testing tracking and prompt-based video segmenta
 - Upload a video.
 - Choose a start frame.
 - Add point, rectangle, or polygon annotations.
+- Optionally upload a `.obj` 3D model, place it on the start frame, and generate tracking points from its projected vertices.
 - Track or segment those annotations from the selected frame to the end of the video.
 - Compare multiple models and export a labeled collage MP4.
 - Save every test into its own folder under `data/output` and offer a download button.
@@ -427,6 +428,18 @@ Controls:
 - `Instrument mask model size`: input size used for ONNX inference, usually the training `image-size`.
 
 When a tracked point lands on the instrument mask, the app hides it and keeps its last valid non-instrument position internally. The point can appear again when the tracker predicts it outside the instrument mask.
+
+## 3D Model Overlay During Tracking
+
+The Streamlit app can load an `.obj` model and project it onto the selected start frame. Use the sidebar upload:
+
+```text
+3D model overlay (.obj)
+```
+
+After uploading, use the `3D model placement` controls to move, scale, and rotate the model. The app draws a wireframe preview and creates tracking points from visible projected vertices. Those points are added to the normal tracking list, so single-model tracking and `Compare models` still work.
+
+Current behavior is a lightweight 2D orthographic projection for interactive testing. It is useful for quickly checking whether point tracking can keep a coarse model overlay aligned, but it is not yet a camera-calibrated 3D registration pipeline.
 
 ## Tracking Drift Filters
 
