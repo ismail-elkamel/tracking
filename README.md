@@ -437,7 +437,7 @@ The Streamlit app can load an `.obj` model and project it onto the selected star
 3D model overlay (.obj)
 ```
 
-After uploading, use the `3D model placement` controls to move, scale, and rotate the model. With `Control 3D model in Select points canvas` enabled, the OBJ wireframe appears directly in the annotation canvas: drag the wireframe to translate it and resize it to zoom. Rotations stay available as sliders. The app creates tracking points from visible projected vertices. Those points are added to the normal tracking list, so single-model tracking and `Compare models` still work.
+After uploading, use the `3D model placement` controls to move, scale, and rotate the model. With `Move/zoom 3D model with mouse` enabled, drag the blue placement box to translate the model and resize the box to zoom. Rotations stay available as sliders. The app draws a wireframe preview and creates tracking points from visible projected vertices. Those points are added to the normal tracking list, so single-model tracking and `Compare models` still work.
 
 Current behavior is a lightweight 2D orthographic projection for interactive testing. It is useful for quickly checking whether point tracking can keep a coarse model overlay aligned, but it is not yet a camera-calibrated 3D registration pipeline.
 
