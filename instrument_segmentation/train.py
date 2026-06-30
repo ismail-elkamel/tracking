@@ -13,6 +13,7 @@ from tqdm import tqdm
 from instrument_segmentation.dataset import (
     InstrumentSegmentationDataset,
     discover_samples,
+    filter_samples_with_instruments,
     split_samples,
 )
 from instrument_segmentation.models import build_model
@@ -305,6 +306,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
     parser.add_argument("--max-test-samples", type=int, default=None)
+    parser.add_argument("--keep-empty-samples", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--visdom", action="store_true")
     parser.add_argument("--visdom-port", type=int, default=8097)
@@ -322,6 +324,16 @@ def main() -> None:
     samples = discover_samples(args.data_root)
     if not samples:
         raise RuntimeError(f"No image/annotation pairs found under {args.data_root!r}.")
+    discovered_count = len(samples)
+    if not args.keep_empty_samples:
+        samples = filter_samples_with_instruments(samples)
+        removed_count = discovered_count - len(samples)
+        print(f"Removed samples without Instrument annotations: {removed_count}")
+    if not samples:
+        raise RuntimeError(
+            "No samples with Instrument annotations found. "
+            "Use --keep-empty-samples to train with empty masks."
+        )
 
     train_samples, val_samples, test_samples = split_samples(
         samples,
@@ -346,6 +358,10 @@ def main() -> None:
     print(f"Validation samples: {len(val_samples)}")
     print(f"Test samples: {len(test_samples)}")
     print("Only objects with classTitle == 'Instrument' are used as positive mask pixels.")
+    if args.keep_empty_samples:
+        print("Samples without Instrument annotations are kept as empty masks.")
+    else:
+        print("Samples without Instrument annotations are skipped.")
 
     train_ds = InstrumentSegmentationDataset(train_samples, image_size=args.image_size, augment=True)
     val_ds = InstrumentSegmentationDataset(val_samples, image_size=args.image_size, augment=False)
