@@ -1088,6 +1088,7 @@ try:
     obj_faces: list[list[int]] = []
     obj_track_count = 0
     obj_overlay_enabled = uploaded_obj is not None
+    use_mouse_obj_placement = False
     obj_max_points = 80
     if uploaded_obj is not None:
         try:
@@ -1099,30 +1100,7 @@ try:
         if obj_overlay_enabled:
             with st.expander("3D model placement", expanded=True):
                 use_mouse_obj_placement = st.checkbox("Move/zoom 3D model with mouse", value=True)
-                if use_mouse_obj_placement:
-                    placement_frame, placement_scale = resize_for_canvas(frame_rgb)
-                    placement_height, placement_width = placement_frame.shape[:2]
-                    placement_result = st_canvas(
-                        fill_color="rgba(60, 220, 255, 0.08)",
-                        stroke_width=3,
-                        stroke_color="#3cdcff",
-                        background_image=Image.fromarray(placement_frame),
-                        update_streamlit=True,
-                        height=placement_height,
-                        width=placement_width,
-                        drawing_mode="transform",
-                        initial_drawing=obj_control_box_drawing(placement_width, placement_height),
-                        display_toolbar=False,
-                        key=f"obj_placement_{video_path.name}_{frame_index}_{uploaded_obj.name}",
-                    )
-                    obj_center_x, obj_center_y, obj_scale = obj_placement_from_canvas(
-                        placement_result.json_data,
-                        placement_scale,
-                        frame_width,
-                        frame_height,
-                    )
-                    st.caption("Move the blue box to translate the model. Resize it to zoom.")
-                else:
+                if not use_mouse_obj_placement:
                     col_a, col_b, col_c = st.columns(3)
                     with col_a:
                         obj_center_x = st.slider("3D model X", 0, frame_width, frame_width // 2, 1)
@@ -1136,6 +1114,10 @@ try:
                             max(40, min(frame_width, frame_height) // 4),
                             5,
                         )
+                else:
+                    obj_center_x = frame_width / 2
+                    obj_center_y = frame_height / 2
+                    obj_scale = max(40, min(frame_width, frame_height) // 4)
                 rot_a, rot_b, rot_c = st.columns(3)
                 with rot_a:
                     obj_rotate_x = st.slider("Rotate X", -180, 180, 0, 1)
@@ -1147,6 +1129,47 @@ try:
                 st.caption(
                     "This is a 2D orthographic projection of the OBJ. The generated points are tracked like normal points."
                 )
+            if not use_mouse_obj_placement:
+                obj_projected_points = project_obj_vertices(
+                    obj_vertices,
+                    frame_width,
+                    frame_height,
+                    obj_center_x,
+                    obj_center_y,
+                    obj_scale,
+                    obj_rotate_x,
+                    obj_rotate_y,
+                    obj_rotate_z,
+                )
+
+    placement_column = None
+    annotation_column = st.container()
+    if obj_overlay_enabled and uploaded_obj is not None and use_mouse_obj_placement:
+        placement_column, annotation_column = st.columns([1, 1], gap="large")
+        with placement_column:
+            st.subheader("Place 3D model")
+            placement_frame, placement_scale = resize_for_canvas(frame_rgb)
+            placement_height, placement_width = placement_frame.shape[:2]
+            placement_result = st_canvas(
+                fill_color="rgba(60, 220, 255, 0.08)",
+                stroke_width=3,
+                stroke_color="#3cdcff",
+                background_image=Image.fromarray(placement_frame),
+                update_streamlit=True,
+                height=placement_height,
+                width=placement_width,
+                drawing_mode="transform",
+                initial_drawing=obj_control_box_drawing(placement_width, placement_height),
+                display_toolbar=False,
+                key=f"obj_placement_{video_path.name}_{frame_index}_{uploaded_obj.name}",
+            )
+            obj_center_x, obj_center_y, obj_scale = obj_placement_from_canvas(
+                placement_result.json_data,
+                placement_scale,
+                frame_width,
+                frame_height,
+            )
+            st.caption("Move the blue box to translate the model. Resize it to zoom.")
             obj_projected_points = project_obj_vertices(
                 obj_vertices,
                 frame_width,
@@ -1166,8 +1189,7 @@ try:
     display_frame, canvas_scale = resize_for_canvas(canvas_background)
     height, width = display_frame.shape[:2]
 
-    left, right = st.columns([1, 1], gap="large")
-    with left:
+    with annotation_column:
         st.subheader("Select points or regions")
         canvas_result = st_canvas(
             fill_color="rgba(255, 72, 92, 0.20)",
@@ -1218,71 +1240,70 @@ try:
         tracks.extend(grid_tracks)
         labels.extend(grid_labels)
 
-    with right:
-        st.subheader("Preview")
-        if tracks:
-            preview_frame = frame_rgb
-            if obj_overlay_enabled and obj_projected_points is not None:
-                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
-            st.image(draw_tracks(preview_frame, tracks, labels), channels="RGB", use_container_width=True)
-            st.caption(
-                f"{manual_point_count} manual point(s), {obj_track_count} 3D model point(s), "
-                f"{grid_point_count} grid point(s), "
-                f"{sum(len(track) for track in tracks)} total tracked point(s)"
-            )
-            total_point_count = sum(len(track) for track in tracks)
-            uses_local_neural_tracker = any(tracker in LOCAL_NEURAL_TRACKERS for tracker in selected_trackers)
-            if uses_local_neural_tracker and (total_point_count > 100 or clip_duration > 60):
-                st.warning(
-                    "This can be slow with CoTracker/LiteTracker. For faster runs use a shorter interval, "
-                    "Fast point cloud, fewer max points, larger spacing, or OpenCV Lucas-Kanade."
-                )
-        else:
-            preview_frame = frame_rgb
-            if obj_overlay_enabled and obj_projected_points is not None:
-                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
-            st.image(preview_frame, channels="RGB", use_container_width=True)
-            st.caption("Draw points, rectangles, or polygons on the left.")
-
-        if compare_mode:
-            if selected_trackers:
-                st.info(f"Comparison will run: {', '.join(selected_trackers)}")
-            else:
-                st.warning("Select at least two models to compare.")
-            for selected_tracker in selected_trackers:
-                if selected_tracker in {SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER}:
-                    st.info(external_tracker_setup_instructions(selected_tracker))
-            if COTRACKER_TRACKER in selected_trackers:
-                st.info("First CoTracker3 run may pause while the PyTorch Hub model loads.")
-            if COTRACKER_OFFLINE_TRACKER in selected_trackers:
-                st.info("CoTracker3 Offline loads the whole selected clip into memory before tracking.")
-            if LITETRACKER_TRACKER in selected_trackers:
-                st.info("LiteTracker uses the cloned official repo and the selected `.pth` weights.")
-        else:
-            if tracker_name == COTRACKER_TRACKER:
-                st.info("First CoTracker3 run may pause while the PyTorch Hub model loads.")
-            elif tracker_name == COTRACKER_OFFLINE_TRACKER:
-                st.info("CoTracker3 Offline loads the whole selected clip into memory before tracking.")
-            elif tracker_name == LITETRACKER_TRACKER:
-                st.info("LiteTracker uses the cloned official repo and the selected `.pth` weights.")
-            elif tracker_name in {SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER}:
-                st.info(external_tracker_setup_instructions(tracker_name))
-
-        can_start = bool(tracks) and (not compare_mode or len(selected_trackers) >= 2)
-        if (
-            can_start
-            and enable_gpu_local_neural
-            and any(tracker in LOCAL_NEURAL_TRACKERS for tracker in selected_trackers)
-            and sum(len(track) for track in tracks) > 100
-        ):
-            st.warning("GPU local tracking with more than 100 points is likely to crash. Use fewer points first.")
-        if compare_mode and selected_trackers and len(selected_trackers) < 2:
-            st.warning("Pick at least two models for a collage comparison.")
-        start_tracking = st.button(
-            "Compare" if compare_mode else "Track",
-            type="primary",
-            disabled=not can_start,
+    st.subheader("Preview")
+    if tracks:
+        preview_frame = frame_rgb
+        if obj_overlay_enabled and obj_projected_points is not None:
+            preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
+        st.image(draw_tracks(preview_frame, tracks, labels), channels="RGB", use_container_width=True)
+        st.caption(
+            f"{manual_point_count} manual point(s), {obj_track_count} 3D model point(s), "
+            f"{grid_point_count} grid point(s), "
+            f"{sum(len(track) for track in tracks)} total tracked point(s)"
         )
+        total_point_count = sum(len(track) for track in tracks)
+        uses_local_neural_tracker = any(tracker in LOCAL_NEURAL_TRACKERS for tracker in selected_trackers)
+        if uses_local_neural_tracker and (total_point_count > 100 or clip_duration > 60):
+            st.warning(
+                "This can be slow with CoTracker/LiteTracker. For faster runs use a shorter interval, "
+                "Fast point cloud, fewer max points, larger spacing, or OpenCV Lucas-Kanade."
+            )
+    else:
+        preview_frame = frame_rgb
+        if obj_overlay_enabled and obj_projected_points is not None:
+            preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
+        st.image(preview_frame, channels="RGB", use_container_width=True)
+        st.caption("Draw points, rectangles, or polygons above.")
+
+    if compare_mode:
+        if selected_trackers:
+            st.info(f"Comparison will run: {', '.join(selected_trackers)}")
+        else:
+            st.warning("Select at least two models to compare.")
+        for selected_tracker in selected_trackers:
+            if selected_tracker in {SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER}:
+                st.info(external_tracker_setup_instructions(selected_tracker))
+        if COTRACKER_TRACKER in selected_trackers:
+            st.info("First CoTracker3 run may pause while the PyTorch Hub model loads.")
+        if COTRACKER_OFFLINE_TRACKER in selected_trackers:
+            st.info("CoTracker3 Offline loads the whole selected clip into memory before tracking.")
+        if LITETRACKER_TRACKER in selected_trackers:
+            st.info("LiteTracker uses the cloned official repo and the selected `.pth` weights.")
+    else:
+        if tracker_name == COTRACKER_TRACKER:
+            st.info("First CoTracker3 run may pause while the PyTorch Hub model loads.")
+        elif tracker_name == COTRACKER_OFFLINE_TRACKER:
+            st.info("CoTracker3 Offline loads the whole selected clip into memory before tracking.")
+        elif tracker_name == LITETRACKER_TRACKER:
+            st.info("LiteTracker uses the cloned official repo and the selected `.pth` weights.")
+        elif tracker_name in {SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER}:
+            st.info(external_tracker_setup_instructions(tracker_name))
+
+    can_start = bool(tracks) and (not compare_mode or len(selected_trackers) >= 2)
+    if (
+        can_start
+        and enable_gpu_local_neural
+        and any(tracker in LOCAL_NEURAL_TRACKERS for tracker in selected_trackers)
+        and sum(len(track) for track in tracks) > 100
+    ):
+        st.warning("GPU local tracking with more than 100 points is likely to crash. Use fewer points first.")
+    if compare_mode and selected_trackers and len(selected_trackers) < 2:
+        st.warning("Pick at least two models for a collage comparison.")
+    start_tracking = st.button(
+        "Compare" if compare_mode else "Track",
+        type="primary",
+        disabled=not can_start,
+    )
 
     if start_tracking:
         source_start_frame = frame_index
