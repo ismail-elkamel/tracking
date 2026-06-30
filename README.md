@@ -236,15 +236,16 @@ Open:
 http://localhost:8097
 ```
 
-Train the default model, `UNet` with an ImageNet-pretrained EfficientNet-B4 encoder:
+Train the default model, `DeepLabV3+` with an ImageNet-pretrained EfficientNet-B4 encoder:
 
 ```bash
 conda activate track_env
 python -m instrument_segmentation.train \
   --data-root "data/Instrument segmentation" \
   --output-dir instrument_segmentation/runs/instrument_model \
-  --model unet_efficientnet_b4 \
+  --model deeplabv3plus_efficientnet_b4 \
   --loss tversky_focal \
+  --optimizer adamw \
   --epochs 50 \
   --batch-size 4 \
   --image-size 512 \
@@ -252,10 +253,20 @@ python -m instrument_segmentation.train \
   --export-onnx
 ```
 
-The default validation split uses units `U61` and `U65`. To choose another validation set:
+The default split is:
+
+```text
+train = all units except validation/test units
+val   = U61 U65
+test  = UT8 UT9
+```
+
+Use validation to choose the model/loss/threshold. Use test only for final performance after choosing settings.
+
+To choose different validation or test videos:
 
 ```bash
-python -m instrument_segmentation.train --val-units UT8 UT9 --visdom
+python -m instrument_segmentation.train --val-units U61 U65 --test-units UT8 UT9 --visdom
 ```
 
 Available model names:
@@ -275,7 +286,17 @@ dice_focal
 dice_bce
 ```
 
-The default `tversky_focal` is chosen for instrument avoidance because it gives more weight to missing instrument pixels. The terminal prints epoch-level `dice`, `iou`, `precision`, and `recall`; for this project, watch `val_recall` closely because low recall means the mask is missing instrument areas.
+Available optimizers:
+
+```text
+adamw
+adam
+radam
+sgd
+rmsprop
+```
+
+The default `tversky_focal` is chosen for instrument avoidance because it gives more weight to missing instrument pixels. The terminal prints epoch-level `dice`, `iou`, `precision`, and `recall` for validation, then evaluates the best checkpoint once on the test split. For this project, watch `val_recall` closely because low recall means the mask is missing instrument areas; also watch `val_precision` because low precision means too many false instrument pixels.
 
 Checkpoints are written locally and ignored by Git:
 
