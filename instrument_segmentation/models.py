@@ -13,7 +13,7 @@ class TorchvisionSegmentationWrapper(nn.Module):
         return self.model(x)["out"]
 
 
-DEFAULT_MODEL = "unet_efficientnet_b4"
+DEFAULT_MODEL = "deeplabv3plus_efficientnet_b4"
 
 
 def build_model(model_name: str = DEFAULT_MODEL) -> nn.Module:
