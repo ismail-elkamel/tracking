@@ -194,25 +194,39 @@ def draw_obj_overlay(
 
 def obj_tracks_from_projection(
     points_xy: np.ndarray,
+    faces: list[list[int]],
     frame_width: int,
     frame_height: int,
-    max_points: int,
+    max_edges: int,
 ) -> tuple[list[np.ndarray], list[str]]:
-    if max_points <= 0 or len(points_xy) == 0:
+    if max_edges <= 0 or len(points_xy) == 0:
         return [], []
-    in_frame = (
-        (points_xy[:, 0] >= 0)
-        & (points_xy[:, 0] < frame_width)
-        & (points_xy[:, 1] >= 0)
-        & (points_xy[:, 1] < frame_height)
-    )
-    visible_points = points_xy[in_frame]
-    if len(visible_points) == 0:
-        return [], []
-    step = max(1, int(math.ceil(len(visible_points) / max_points)))
-    selected = visible_points[::step][:max_points].astype(np.float32)
-    tracks = [point.reshape(1, 2) for point in selected]
-    labels = [f"obj {index}" for index in range(1, len(tracks) + 1)]
+    seen_edges: set[tuple[int, int]] = set()
+    tracks: list[np.ndarray] = []
+    for face in faces:
+        valid_face = [index for index in face if 0 <= index < len(points_xy)]
+        if len(valid_face) < 2:
+            continue
+        for start, end in zip(valid_face, valid_face[1:] + valid_face[:1]):
+            edge = tuple(sorted((start, end)))
+            if edge in seen_edges:
+                continue
+            seen_edges.add(edge)
+            segment = points_xy[[start, end]].astype(np.float32)
+            in_frame = (
+                (segment[:, 0] >= 0)
+                & (segment[:, 0] < frame_width)
+                & (segment[:, 1] >= 0)
+                & (segment[:, 1] < frame_height)
+            )
+            if not bool(in_frame.any()):
+                continue
+            tracks.append(segment)
+            if len(tracks) >= max_edges:
+                break
+        if len(tracks) >= max_edges:
+            break
+    labels = [f"obj edge {index}" for index in range(1, len(tracks) + 1)]
     return tracks, labels
 
 
@@ -1125,7 +1139,7 @@ try:
                     obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
                 with rot_c:
                     obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
-                obj_max_points = st.slider("3D model tracking points", 5, 500, 80, 5)
+                obj_max_points = st.slider("3D model tracking edges", 5, 500, 80, 5)
                 st.caption(
                     "This is a 2D orthographic projection of the OBJ. The generated points are tracked like normal points."
                 )
@@ -1210,6 +1224,7 @@ try:
     if obj_overlay_enabled and obj_projected_points is not None:
         obj_tracks, obj_labels = obj_tracks_from_projection(
             obj_projected_points,
+            obj_faces,
             frame_width,
             frame_height,
             obj_max_points,
