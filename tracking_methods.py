@@ -203,7 +203,9 @@ def write_prompt_file(
 
 def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[str]) -> np.ndarray:
     output = frame_rgb.copy()
-    obj_overlay = output.copy()
+    obj_overlay = frame_rgb.copy()
+    obj_mask = np.zeros(frame_rgb.shape[:2], dtype=np.uint8)
+    obj_points: list[tuple[int, int]] = []
     has_obj_overlay = False
     colors = [
         (255, 72, 92),
@@ -222,7 +224,10 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
         if is_obj_track:
             if len(pts) >= 3:
                 cv2.fillPoly(obj_overlay, [pts], (245, 255, 61), lineType=cv2.LINE_AA)
+                cv2.fillPoly(obj_mask, [pts], 255, lineType=cv2.LINE_AA)
                 cv2.polylines(obj_overlay, [pts], True, (245, 255, 61), 1, lineType=cv2.LINE_AA)
+                for point in pts:
+                    obj_points.append((int(point[0]), int(point[1])))
                 has_obj_overlay = True
             continue
         if len(pts) == 1:
@@ -246,7 +251,11 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
                 cv2.LINE_AA,
             )
     if has_obj_overlay:
-        output = cv2.addWeighted(obj_overlay, 0.5, output, 0.5, 0)
+        blended = cv2.addWeighted(obj_overlay, 0.5, output, 0.5, 0)
+        output[obj_mask > 0] = blended[obj_mask > 0]
+        for point in obj_points[:: max(1, len(obj_points) // 120)]:
+            cv2.circle(output, point, 4, (20, 20, 20), -1, lineType=cv2.LINE_AA)
+            cv2.circle(output, point, 2, (245, 255, 61), -1, lineType=cv2.LINE_AA)
 
         for index, points in enumerate(tracks):
             label = labels[index] if index < len(labels) else f"annotation {index + 1}"
