@@ -111,10 +111,12 @@ def metrics_from_counts(tp: int, fp: int, fn: int, tn: int, eps: float = 1e-6) -
 
 
 class VisdomLogger:
-    def __init__(self, enabled: bool, env: str, port: int) -> None:
+    def __init__(self, enabled: bool, env: str, images_env: str, port: int) -> None:
         self.enabled = enabled
         self.viz = None
+        self.images_viz = None
         self.env = env
+        self.images_env = images_env
         if not enabled:
             return
         try:
@@ -124,7 +126,10 @@ class VisdomLogger:
             if not self.viz.check_connection(timeout_seconds=3):
                 print("Visdom server is not reachable; continuing without Visdom.")
                 self.viz = None
+                self.images_viz = None
                 self.enabled = False
+                return
+            self.images_viz = self.viz if images_env == env else visdom.Visdom(port=port, env=images_env)
         except Exception as error:
             print(f"Could not initialize Visdom: {error}. Continuing without Visdom.")
             self.enabled = False
@@ -149,9 +154,9 @@ class VisdomLogger:
         )
 
     def images(self, name: str, images: torch.Tensor, caption: str) -> None:
-        if not self.enabled or self.viz is None:
+        if not self.enabled or self.images_viz is None:
             return
-        self.viz.images(
+        self.images_viz.images(
             images.detach().cpu(),
             win=name,
             opts={"title": name, "caption": caption},
@@ -342,6 +347,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visdom", action="store_true")
     parser.add_argument("--visdom-port", type=int, default=8097)
     parser.add_argument("--visdom-env", default="instrument_segmentation")
+    parser.add_argument("--visdom-images-env", default=None)
     parser.add_argument("--visdom-test-images", type=int, default=4)
     parser.add_argument("--visdom-hard-images", type=int, default=4)
     parser.add_argument("--export-onnx", action="store_true")
@@ -432,7 +438,13 @@ def main() -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     use_amp = device.type == "cuda" and not args.no_amp
     scaler = GradScaler(device.type, enabled=use_amp)
-    visdom_logger = VisdomLogger(args.visdom, env=args.visdom_env, port=args.visdom_port)
+    visdom_images_env = args.visdom_images_env or f"{args.visdom_env}_images"
+    visdom_logger = VisdomLogger(
+        args.visdom,
+        env=args.visdom_env,
+        images_env=visdom_images_env,
+        port=args.visdom_port,
+    )
     loss_fn = build_loss(args.loss)
     print(f"Model: {args.model}")
     print(f"Loss: {args.loss}")
