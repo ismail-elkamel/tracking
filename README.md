@@ -251,6 +251,7 @@ python -m instrument_segmentation.train \
   --image-size 512 \
   --visdom \
   --visdom-test-images 4 \
+  --visdom-hard-images 4 \
   --export-onnx
 ```
 
@@ -305,13 +306,17 @@ rmsprop
 
 The default `tversky_focal` is chosen for instrument avoidance because it gives more weight to missing instrument pixels. The terminal prints epoch-level `dice`, `iou`, `precision`, and `recall` for validation, then evaluates the best checkpoint once on the test split. For this project, watch `val_recall` closely because low recall means the mask is missing instrument areas; also watch `val_precision` because low precision means too many false instrument pixels.
 
-After the final test evaluation, Visdom shows a `test_predictions` window with a few test examples. Each panel is:
+After the final test evaluation, Visdom shows a few test prediction windows. Each panel is:
 
 ```text
 original | ground truth in green | prediction in red
 ```
 
-Use `--visdom-test-images 0` to disable those test previews.
+- `test_predictions`: first test examples.
+- `test_worst_iou`: test examples where prediction is farthest from the ground truth.
+- `test_false_positives`: test examples with the highest false-positive rate, where red appears outside green.
+
+Use `--visdom-test-images 0` to disable the regular test previews. Use `--visdom-hard-images 0` to disable the worst-case previews.
 
 Checkpoints are written locally and ignored by Git:
 
