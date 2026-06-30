@@ -48,6 +48,18 @@ def discover_samples(data_root: str | Path) -> list[SegmentationSample]:
     return samples
 
 
+def has_instrument_annotation(annotation_path: str | Path) -> bool:
+    payload = json.loads(Path(annotation_path).read_text(encoding="utf-8"))
+    return any(
+        obj.get("classTitle", "").strip().lower() == INSTRUMENT_LABEL and obj.get("bitmap")
+        for obj in payload.get("objects", [])
+    )
+
+
+def filter_samples_with_instruments(samples: list[SegmentationSample]) -> list[SegmentationSample]:
+    return [sample for sample in samples if has_instrument_annotation(sample.annotation_path)]
+
+
 def split_samples(
     samples: list[SegmentationSample],
     val_units: list[str] | None = None,
