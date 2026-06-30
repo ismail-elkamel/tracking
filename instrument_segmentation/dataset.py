@@ -51,20 +51,31 @@ def discover_samples(data_root: str | Path) -> list[SegmentationSample]:
 def split_samples(
     samples: list[SegmentationSample],
     val_units: list[str] | None = None,
+    test_units: list[str] | None = None,
     val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
     seed: int = 42,
-) -> tuple[list[SegmentationSample], list[SegmentationSample]]:
-    if val_units:
+) -> tuple[list[SegmentationSample], list[SegmentationSample], list[SegmentationSample]]:
+    if val_units or test_units:
         val_set = set(val_units)
-        train = [sample for sample in samples if sample.unit not in val_set]
+        test_set = set(test_units or [])
+        overlap = val_set & test_set
+        if overlap:
+            raise ValueError(f"Validation and test units overlap: {sorted(overlap)}")
+        train = [sample for sample in samples if sample.unit not in val_set and sample.unit not in test_set]
         val = [sample for sample in samples if sample.unit in val_set]
-        return train, val
+        test = [sample for sample in samples if sample.unit in test_set]
+        return train, val, test
 
     rng = random.Random(seed)
     shuffled = samples.copy()
     rng.shuffle(shuffled)
     val_count = max(1, int(round(len(shuffled) * val_ratio)))
-    return shuffled[val_count:], shuffled[:val_count]
+    test_count = max(1, int(round(len(shuffled) * test_ratio)))
+    val = shuffled[:val_count]
+    test = shuffled[val_count : val_count + test_count]
+    train = shuffled[val_count + test_count :]
+    return train, val, test
 
 
 def decode_supervisely_bitmap(bitmap: dict, height: int, width: int) -> np.ndarray:
