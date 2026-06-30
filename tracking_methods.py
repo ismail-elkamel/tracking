@@ -203,6 +203,8 @@ def write_prompt_file(
 
 def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[str]) -> np.ndarray:
     output = frame_rgb.copy()
+    obj_overlay = output.copy()
+    has_obj_overlay = False
     colors = [
         (255, 72, 92),
         (28, 167, 236),
@@ -216,20 +218,21 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
         color = colors[index % len(colors)]
         label = labels[index] if index < len(labels) else f"annotation {index + 1}"
         is_obj_track = label.startswith("obj ")
-        if is_obj_track:
-            color = (245, 255, 61)
         pts = np.round(points).astype(int)
+        if is_obj_track:
+            if len(pts) >= 3:
+                cv2.fillPoly(obj_overlay, [pts], (245, 255, 61), lineType=cv2.LINE_AA)
+                cv2.polylines(obj_overlay, [pts], True, (245, 255, 61), 1, lineType=cv2.LINE_AA)
+                has_obj_overlay = True
+            continue
         if len(pts) == 1:
-            if is_obj_track:
-                continue
             cv2.circle(output, tuple(pts[0]), 7, color, -1, lineType=cv2.LINE_AA)
             cv2.circle(output, tuple(pts[0]), 11, (255, 255, 255), 2, lineType=cv2.LINE_AA)
         else:
             closed = len(pts) >= 3
-            cv2.polylines(output, [pts], closed, color, 1 if is_obj_track else 3, lineType=cv2.LINE_AA)
-            if not is_obj_track:
-                for point in pts:
-                    cv2.circle(output, tuple(point), 5, color, -1, lineType=cv2.LINE_AA)
+            cv2.polylines(output, [pts], closed, color, 3, lineType=cv2.LINE_AA)
+            for point in pts:
+                cv2.circle(output, tuple(point), 5, color, -1, lineType=cv2.LINE_AA)
         if len(pts) and label and not label.startswith(("grid ", "obj ")):
             x, y = pts[0]
             cv2.putText(
@@ -242,6 +245,22 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
                 2,
                 cv2.LINE_AA,
             )
+    if has_obj_overlay:
+        output = cv2.addWeighted(obj_overlay, 0.5, output, 0.5, 0)
+
+        for index, points in enumerate(tracks):
+            label = labels[index] if index < len(labels) else f"annotation {index + 1}"
+            if label.startswith("obj "):
+                continue
+            pts = np.round(points).astype(int)
+            color = colors[index % len(colors)]
+            if len(pts) == 1:
+                cv2.circle(output, tuple(pts[0]), 7, color, -1, lineType=cv2.LINE_AA)
+                cv2.circle(output, tuple(pts[0]), 11, (255, 255, 255), 2, lineType=cv2.LINE_AA)
+            elif len(pts) > 1:
+                cv2.polylines(output, [pts], len(pts) >= 3, color, 3, lineType=cv2.LINE_AA)
+                for point in pts:
+                    cv2.circle(output, tuple(point), 5, color, -1, lineType=cv2.LINE_AA)
     return output
 
 
