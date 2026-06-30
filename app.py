@@ -216,6 +216,52 @@ def obj_tracks_from_projection(
     return tracks, labels
 
 
+def obj_control_box_drawing(width: int, height: int) -> dict[str, Any]:
+    box_size = max(60, min(width, height) // 3)
+    return {
+        "version": "4.4.0",
+        "objects": [
+            {
+                "type": "rect",
+                "left": (width - box_size) / 2,
+                "top": (height - box_size) / 2,
+                "width": box_size,
+                "height": box_size,
+                "scaleX": 1,
+                "scaleY": 1,
+                "fill": "rgba(60, 220, 255, 0.08)",
+                "stroke": "#3cdcff",
+                "strokeWidth": 3,
+                "transparentCorners": False,
+                "cornerColor": "#3cdcff",
+            }
+        ],
+    }
+
+
+def obj_placement_from_canvas(
+    json_data: dict[str, Any] | None,
+    canvas_scale: float,
+    frame_width: int,
+    frame_height: int,
+) -> tuple[float, float, float]:
+    default_scale = max(40.0, min(frame_width, frame_height) / 4.0)
+    if not json_data:
+        return frame_width / 2.0, frame_height / 2.0, default_scale
+    for obj in json_data.get("objects", []):
+        if obj.get("type") != "rect":
+            continue
+        left = float(obj.get("left", 0.0))
+        top = float(obj.get("top", 0.0))
+        width = float(obj.get("width", 0.0)) * float(obj.get("scaleX", 1.0))
+        height = float(obj.get("height", 0.0)) * float(obj.get("scaleY", 1.0))
+        center_x = (left + width / 2.0) / canvas_scale
+        center_y = (top + height / 2.0) / canvas_scale
+        scale_px = max(10.0, max(width, height) / (2.0 * canvas_scale))
+        return center_x, center_y, scale_px
+    return frame_width / 2.0, frame_height / 2.0, default_scale
+
+
 def cleanup_path(path: Path) -> None:
     try:
         if path.is_dir():
@@ -1052,21 +1098,50 @@ try:
             obj_vertices = np.empty((0, 3), dtype=np.float32)
         if obj_overlay_enabled:
             with st.expander("3D model placement", expanded=True):
-                col_a, col_b, col_c = st.columns(3)
-                with col_a:
-                    obj_center_x = st.slider("3D model X", 0, frame_width, frame_width // 2, 1)
-                    obj_rotate_x = st.slider("Rotate X", -180, 180, 0, 1)
-                with col_b:
-                    obj_center_y = st.slider("3D model Y", 0, frame_height, frame_height // 2, 1)
-                    obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
-                with col_c:
-                    obj_scale = st.slider(
-                        "3D model scale px",
-                        10,
-                        max(20, max(frame_width, frame_height)),
-                        max(40, min(frame_width, frame_height) // 4),
-                        5,
+                use_mouse_obj_placement = st.checkbox("Move/zoom 3D model with mouse", value=True)
+                if use_mouse_obj_placement:
+                    placement_frame, placement_scale = resize_for_canvas(frame_rgb)
+                    placement_height, placement_width = placement_frame.shape[:2]
+                    placement_result = st_canvas(
+                        fill_color="rgba(60, 220, 255, 0.08)",
+                        stroke_width=3,
+                        stroke_color="#3cdcff",
+                        background_image=Image.fromarray(placement_frame),
+                        update_streamlit=True,
+                        height=placement_height,
+                        width=placement_width,
+                        drawing_mode="transform",
+                        initial_drawing=obj_control_box_drawing(placement_width, placement_height),
+                        display_toolbar=False,
+                        key=f"obj_placement_{video_path.name}_{frame_index}_{uploaded_obj.name}",
                     )
+                    obj_center_x, obj_center_y, obj_scale = obj_placement_from_canvas(
+                        placement_result.json_data,
+                        placement_scale,
+                        frame_width,
+                        frame_height,
+                    )
+                    st.caption("Move the blue box to translate the model. Resize it to zoom.")
+                else:
+                    col_a, col_b, col_c = st.columns(3)
+                    with col_a:
+                        obj_center_x = st.slider("3D model X", 0, frame_width, frame_width // 2, 1)
+                    with col_b:
+                        obj_center_y = st.slider("3D model Y", 0, frame_height, frame_height // 2, 1)
+                    with col_c:
+                        obj_scale = st.slider(
+                            "3D model scale px",
+                            10,
+                            max(20, max(frame_width, frame_height)),
+                            max(40, min(frame_width, frame_height) // 4),
+                            5,
+                        )
+                rot_a, rot_b, rot_c = st.columns(3)
+                with rot_a:
+                    obj_rotate_x = st.slider("Rotate X", -180, 180, 0, 1)
+                with rot_b:
+                    obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
+                with rot_c:
                     obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
                 obj_max_points = st.slider("3D model tracking points", 5, 500, 80, 5)
                 st.caption(
