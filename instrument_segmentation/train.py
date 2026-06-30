@@ -69,6 +69,26 @@ def build_loss(loss_name: str):
     raise ValueError("Unknown loss. Use one of: tversky_focal, dice_focal, dice_bce.")
 
 
+def build_optimizer(
+    optimizer_name: str,
+    parameters,
+    lr: float,
+    weight_decay: float,
+    momentum: float,
+) -> torch.optim.Optimizer:
+    if optimizer_name == "adamw":
+        return torch.optim.AdamW(parameters, lr=lr, weight_decay=weight_decay)
+    if optimizer_name == "adam":
+        return torch.optim.Adam(parameters, lr=lr, weight_decay=weight_decay)
+    if optimizer_name == "radam":
+        return torch.optim.RAdam(parameters, lr=lr, weight_decay=weight_decay)
+    if optimizer_name == "sgd":
+        return torch.optim.SGD(parameters, lr=lr, momentum=momentum, weight_decay=weight_decay)
+    if optimizer_name == "rmsprop":
+        return torch.optim.RMSprop(parameters, lr=lr, momentum=momentum, weight_decay=weight_decay)
+    raise ValueError("Unknown optimizer. Use one of: adamw, adam, radam, sgd, rmsprop.")
+
+
 def confusion_counts(logits: torch.Tensor, targets: torch.Tensor) -> tuple[int, int, int, int]:
     preds = torch.sigmoid(logits) > 0.5
     targets_bool = targets > 0.5
@@ -136,6 +156,7 @@ def run_epoch(
     scaler: GradScaler,
     use_amp: bool,
     loss_fn,
+    phase: str | None = None,
 ) -> dict[str, float]:
     training = optimizer is not None
     model.train(training)
@@ -144,7 +165,7 @@ def run_epoch(
     tp = fp = fn = tn = 0
     batches = 0
 
-    progress = tqdm(loader, leave=False, desc="train" if training else "val")
+    progress = tqdm(loader, leave=False, desc=phase or ("train" if training else "val"))
     for images, masks in progress:
         images = images.to(device, non_blocking=True)
         masks = masks.to(device, non_blocking=True)
@@ -196,6 +217,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--image-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--optimizer", choices=["adamw", "adam", "radam", "sgd", "rmsprop"], default="adamw")
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument(
         "--loss",
         choices=["tversky_focal", "dice_focal", "dice_bce"],
@@ -204,9 +228,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--val-ratio", type=float, default=0.15)
+    parser.add_argument("--test-ratio", type=float, default=0.15)
     parser.add_argument("--val-units", nargs="*", default=["U61", "U65"])
+    parser.add_argument("--test-units", nargs="*", default=["UT8", "UT9"])
     parser.add_argument("--max-train-samples", type=int, default=None)
     parser.add_argument("--max-val-samples", type=int, default=None)
+    parser.add_argument("--max-test-samples", type=int, default=None)
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--visdom", action="store_true")
     parser.add_argument("--visdom-port", type=int, default=8097)
@@ -224,27 +251,33 @@ def main() -> None:
     if not samples:
         raise RuntimeError(f"No image/annotation pairs found under {args.data_root!r}.")
 
-    train_samples, val_samples = split_samples(
+    train_samples, val_samples, test_samples = split_samples(
         samples,
         val_units=args.val_units,
+        test_units=args.test_units,
         val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
         seed=args.seed,
     )
-    if not train_samples or not val_samples:
-        raise RuntimeError("Train/validation split is empty. Adjust --val-units or --val-ratio.")
+    if not train_samples or not val_samples or not test_samples:
+        raise RuntimeError("Train/validation/test split is empty. Adjust --val-units, --test-units, or ratios.")
     if args.max_train_samples is not None:
         train_samples = train_samples[: args.max_train_samples]
     if args.max_val_samples is not None:
         val_samples = val_samples[: args.max_val_samples]
+    if args.max_test_samples is not None:
+        test_samples = test_samples[: args.max_test_samples]
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Training samples: {len(train_samples)}")
     print(f"Validation samples: {len(val_samples)}")
+    print(f"Test samples: {len(test_samples)}")
     print("Only objects with classTitle == 'Instrument' are used as positive mask pixels.")
 
     train_ds = InstrumentSegmentationDataset(train_samples, image_size=args.image_size, augment=True)
     val_ds = InstrumentSegmentationDataset(val_samples, image_size=args.image_size, augment=False)
+    test_ds = InstrumentSegmentationDataset(test_samples, image_size=args.image_size, augment=False)
     train_loader = DataLoader(
         train_ds,
         batch_size=args.batch_size,
@@ -259,10 +292,23 @@ def main() -> None:
         num_workers=args.num_workers,
         pin_memory=True,
     )
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model = build_model(args.model).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = build_optimizer(
+        args.optimizer,
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        momentum=args.momentum,
+    )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     use_amp = device.type == "cuda" and not args.no_amp
     scaler = GradScaler(device.type, enabled=use_amp)
@@ -270,12 +316,13 @@ def main() -> None:
     loss_fn = build_loss(args.loss)
     print(f"Model: {args.model}")
     print(f"Loss: {args.loss}")
+    print(f"Optimizer: {args.optimizer}")
 
     best_iou = -1.0
     for epoch in range(1, args.epochs + 1):
         start = time.time()
-        train_metrics = run_epoch(model, train_loader, optimizer, device, scaler, use_amp, loss_fn)
-        val_metrics = run_epoch(model, val_loader, None, device, scaler, use_amp, loss_fn)
+        train_metrics = run_epoch(model, train_loader, optimizer, device, scaler, use_amp, loss_fn, phase="train")
+        val_metrics = run_epoch(model, val_loader, None, device, scaler, use_amp, loss_fn, phase="val")
         scheduler.step()
 
         visdom_logger.plot("loss", epoch, train_metrics["loss"], val_metrics["loss"])
@@ -288,6 +335,7 @@ def main() -> None:
             "epoch": epoch,
             "model": args.model,
             "loss": args.loss,
+            "optimizer_name": args.optimizer,
             "image_size": args.image_size,
             "state_dict": model.state_dict(),
             "optimizer": optimizer.state_dict(),
@@ -310,6 +358,15 @@ def main() -> None:
 
     best_checkpoint = output_dir / "best.pt"
     print(f"Best checkpoint: {best_checkpoint}")
+    checkpoint = torch.load(best_checkpoint, map_location=device)
+    model.load_state_dict(checkpoint["state_dict"])
+    test_metrics = run_epoch(model, test_loader, None, device, scaler, use_amp, loss_fn, phase="test")
+    print(
+        "test "
+        f"loss={test_metrics['loss']:.4f} dice={test_metrics['dice']:.4f} "
+        f"iou={test_metrics['iou']:.4f} precision={test_metrics['precision']:.4f} "
+        f"recall={test_metrics['recall']:.4f} specificity={test_metrics['specificity']:.4f}"
+    )
     if args.export_onnx:
         onnx_output = Path(args.onnx_output) if args.onnx_output else output_dir / "best.onnx"
         exported_path = export_checkpoint_to_onnx(best_checkpoint, onnx_output, device_name="cpu")
