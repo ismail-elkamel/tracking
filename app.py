@@ -1127,7 +1127,7 @@ try:
                     obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
                 obj_max_points = st.slider("3D model tracking points", 50, 3000, 800, 50)
                 st.caption(
-                    "Points are sampled across the whole OBJ, then rendered as a complete 50% mesh overlay in the output."
+                    "Visible OBJ points are tracked as anchors; the complete OBJ geometry is redrawn from them in the output."
                 )
             if not use_mouse_obj_placement:
                 obj_projected_points = project_obj_vertices(
@@ -1216,6 +1216,13 @@ try:
             obj_max_points,
         )
         obj_track_count = len(obj_tracks)
+        if obj_tracks and obj_labels:
+            _tracking_methods.register_obj_overlay(
+                obj_labels[0],
+                obj_tracks[0],
+                obj_projected_points,
+                obj_faces,
+            )
         tracks.extend(obj_tracks)
         labels.extend(obj_labels)
     grid_point_count = 0
