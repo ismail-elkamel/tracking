@@ -1247,30 +1247,34 @@ try:
         tracks.extend(grid_tracks)
         labels.extend(grid_labels)
 
-    st.subheader("Preview")
-    if tracks:
-        preview_frame = frame_rgb
-        if obj_overlay_enabled and obj_projected_points is not None:
-            preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
-        st.image(draw_tracks(preview_frame, tracks, labels), channels="RGB", use_container_width=True)
-        st.caption(
-            f"{manual_point_count} manual point(s), {obj_track_count} 3D model point(s), "
-            f"{grid_point_count} grid point(s), "
-            f"{sum(len(track) for track in tracks)} total tracked point(s)"
-        )
-        total_point_count = sum(len(track) for track in tracks)
-        uses_local_neural_tracker = any(tracker in LOCAL_NEURAL_TRACKERS for tracker in selected_trackers)
-        if uses_local_neural_tracker and (total_point_count > 100 or clip_duration > 60):
+    preview_column, preview_info_column = st.columns([1, 1], gap="large")
+    with preview_column:
+        st.subheader("Preview")
+        if tracks:
+            preview_frame = frame_rgb
+            if obj_overlay_enabled and obj_projected_points is not None:
+                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
+            st.image(draw_tracks(preview_frame, tracks, labels), channels="RGB", use_container_width=True)
+            st.caption(
+                f"{manual_point_count} manual point(s), {obj_track_count} 3D model face(s), "
+                f"{grid_point_count} grid point(s), "
+                f"{sum(len(track) for track in tracks)} total tracked item(s)"
+            )
+        else:
+            preview_frame = frame_rgb
+            if obj_overlay_enabled and obj_projected_points is not None:
+                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
+            st.image(preview_frame, channels="RGB", use_container_width=True)
+            st.caption("Draw points, rectangles, or polygons above.")
+
+    total_point_count = sum(len(track) for track in tracks)
+    uses_local_neural_tracker = any(tracker in LOCAL_NEURAL_TRACKERS for tracker in selected_trackers)
+    with preview_info_column:
+        if tracks and uses_local_neural_tracker and (total_point_count > 100 or clip_duration > 60):
             st.warning(
                 "This can be slow with CoTracker/LiteTracker. For faster runs use a shorter interval, "
                 "Fast point cloud, fewer max points, larger spacing, or OpenCV Lucas-Kanade."
             )
-    else:
-        preview_frame = frame_rgb
-        if obj_overlay_enabled and obj_projected_points is not None:
-            preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
-        st.image(preview_frame, channels="RGB", use_container_width=True)
-        st.caption("Draw points, rectangles, or polygons above.")
 
     if compare_mode:
         if selected_trackers:
