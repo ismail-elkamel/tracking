@@ -248,12 +248,14 @@ def log_test_prediction_examples(
     use_amp: bool,
     visdom_logger: VisdomLogger,
     max_images: int,
+    max_hard_images: int,
 ) -> None:
-    if max_images <= 0 or not visdom_logger.enabled:
+    if (max_images <= 0 and max_hard_images <= 0) or not visdom_logger.enabled:
         return
 
     model.eval()
-    panels: list[torch.Tensor] = []
+    examples: list[torch.Tensor] = []
+    scored_panels: list[tuple[float, float, torch.Tensor]] = []
     with torch.inference_mode():
         for images, masks in loader:
             images = images.to(device, non_blocking=True)
@@ -268,15 +270,44 @@ def log_test_prediction_examples(
                         align_corners=False,
                     )
             batch_panels = make_prediction_panels(images, masks, logits)
-            panels.extend(batch_panels.detach().cpu())
-            if len(panels) >= max_images:
-                break
+            preds = (torch.sigmoid(logits) >= 0.5).float()
+            targets = (masks > 0.5).float()
+            flat_preds = preds.flatten(1)
+            flat_targets = targets.flatten(1)
+            intersections = (flat_preds * flat_targets).sum(dim=1)
+            unions = ((flat_preds + flat_targets) > 0.0).float().sum(dim=1)
+            false_positives = (flat_preds * (1.0 - flat_targets)).sum(dim=1)
+            pred_pixels = flat_preds.sum(dim=1)
+            sample_ious = (intersections + 1e-6) / (unions + 1e-6)
+            false_positive_rates = torch.where(
+                pred_pixels > 0.0,
+                false_positives / pred_pixels.clamp_min(1.0),
+                torch.zeros_like(false_positives),
+            )
 
-    if panels:
+            for panel, iou, fp_rate in zip(batch_panels.detach().cpu(), sample_ious, false_positive_rates):
+                if len(examples) < max_images:
+                    examples.append(panel)
+                scored_panels.append((float(iou.item()), float(fp_rate.item()), panel))
+
+    if examples:
         visdom_logger.images(
             "test_predictions",
-            torch.stack(panels[:max_images]),
+            torch.stack(examples),
             "Each panel: original | ground truth in green | prediction in red",
+        )
+    if max_hard_images > 0 and scored_panels:
+        worst_iou = sorted(scored_panels, key=lambda item: item[0])[:max_hard_images]
+        worst_fp = sorted(scored_panels, key=lambda item: item[1], reverse=True)[:max_hard_images]
+        visdom_logger.images(
+            "test_worst_iou",
+            torch.stack([panel for _, _, panel in worst_iou]),
+            "Lowest IoU test cases. Each panel: original | ground truth in green | prediction in red",
+        )
+        visdom_logger.images(
+            "test_false_positives",
+            torch.stack([panel for _, _, panel in worst_fp]),
+            "Highest false-positive-rate test cases. Red outside green is extra prediction.",
         )
 
 
@@ -312,6 +343,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visdom-port", type=int, default=8097)
     parser.add_argument("--visdom-env", default="instrument_segmentation")
     parser.add_argument("--visdom-test-images", type=int, default=4)
+    parser.add_argument("--visdom-hard-images", type=int, default=4)
     parser.add_argument("--export-onnx", action="store_true")
     parser.add_argument("--onnx-output", default=None)
     return parser.parse_args()
@@ -456,6 +488,7 @@ def main() -> None:
         use_amp,
         visdom_logger,
         args.visdom_test_images,
+        args.visdom_hard_images,
     )
     print(
         "test "
