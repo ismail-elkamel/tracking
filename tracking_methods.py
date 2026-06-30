@@ -46,6 +46,29 @@ class TrackValidationConfig:
     black_threshold: int = 12
 
 
+@dataclass(frozen=True)
+class ObjOverlayMetadata:
+    anchor_points: np.ndarray
+    model_points: np.ndarray
+    faces: list[list[int]]
+
+
+OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
+
+
+def register_obj_overlay(
+    label: str,
+    anchor_points: np.ndarray,
+    model_points: np.ndarray,
+    faces: list[list[int]],
+) -> None:
+    OBJ_OVERLAYS[label] = ObjOverlayMetadata(
+        anchor_points=anchor_points.astype(np.float32),
+        model_points=model_points.astype(np.float32),
+        faces=faces,
+    )
+
+
 def cuda_is_available() -> bool:
     import torch
 
@@ -201,45 +224,80 @@ def write_prompt_file(
     return path
 
 
-def draw_obj_mesh(output: np.ndarray, points: np.ndarray) -> np.ndarray:
+def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.ndarray:
+    metadata = OBJ_OVERLAYS.get(label)
+    if metadata is None:
+        return tracked_points
+    source = metadata.anchor_points
+    target = tracked_points.astype(np.float32)
+    if len(source) < 2 or len(target) < 2:
+        return metadata.model_points
+    count = min(len(source), len(target))
+    transform, _ = cv2.estimateAffinePartial2D(
+        source[:count],
+        target[:count],
+        method=cv2.RANSAC,
+        ransacReprojThreshold=8.0,
+    )
+    if transform is None:
+        transform = cv2.getAffineTransform(
+            np.float32([source[0], source[count // 2], source[count - 1]]),
+            np.float32([target[0], target[count // 2], target[count - 1]]),
+        ) if count >= 3 else None
+    if transform is None:
+        return metadata.model_points
+    ones = np.ones((len(metadata.model_points), 1), dtype=np.float32)
+    homogeneous = np.hstack([metadata.model_points.astype(np.float32), ones])
+    return (homogeneous @ transform.T).astype(np.float32)
+
+
+def draw_obj_mesh(output: np.ndarray, label: str, tracked_points: np.ndarray) -> np.ndarray:
+    metadata = OBJ_OVERLAYS.get(label)
+    points = transform_obj_model_points(label, tracked_points)
+    faces = metadata.faces if metadata is not None else []
     if len(points) < 3:
         return output
 
     height, width = output.shape[:2]
-    pts = np.round(points).astype(np.int32)
-    in_frame = (
-        (pts[:, 0] >= 0)
-        & (pts[:, 0] < width)
-        & (pts[:, 1] >= 0)
-        & (pts[:, 1] < height)
-    )
-    pts = pts[in_frame]
-    if len(pts) < 3:
-        return output
-
     overlay = output.copy()
     mask = np.zeros((height, width), dtype=np.uint8)
-    hull = cv2.convexHull(pts)
-    cv2.fillConvexPoly(overlay, hull, (60, 220, 255), lineType=cv2.LINE_AA)
-    cv2.fillConvexPoly(mask, hull, 255, lineType=cv2.LINE_AA)
+    rendered_faces = 0
+    for face in faces[:8000]:
+        valid_face = [index for index in face if 0 <= index < len(points)]
+        if len(valid_face) < 3:
+            continue
+        polygon = np.round(points[valid_face]).astype(np.int32)
+        in_frame = (
+            (polygon[:, 0] >= 0)
+            & (polygon[:, 0] < width)
+            & (polygon[:, 1] >= 0)
+            & (polygon[:, 1] < height)
+        )
+        if not bool(in_frame.any()):
+            continue
+        cv2.fillPoly(overlay, [polygon], (60, 220, 255), lineType=cv2.LINE_AA)
+        cv2.fillPoly(mask, [polygon], 255, lineType=cv2.LINE_AA)
+        cv2.polylines(overlay, [polygon], True, (60, 220, 255), 1, lineType=cv2.LINE_AA)
+        rendered_faces += 1
 
-    step = max(1, len(pts) // 350)
-    wire_points = pts[::step]
-    if len(wire_points) >= 3:
-        subdiv = cv2.Subdiv2D((0, 0, width, height))
-        for point in wire_points:
-            try:
-                subdiv.insert((float(point[0]), float(point[1])))
-            except cv2.error:
-                continue
-        for x1, y1, x2, y2, x3, y3 in subdiv.getTriangleList():
-            triangle = np.array([[x1, y1], [x2, y2], [x3, y3]], dtype=np.int32)
-            if np.all((triangle[:, 0] >= 0) & (triangle[:, 0] < width) & (triangle[:, 1] >= 0) & (triangle[:, 1] < height)):
-                cv2.polylines(overlay, [triangle], True, (60, 220, 255), 1, lineType=cv2.LINE_AA)
+    if rendered_faces == 0:
+        pts = np.round(points).astype(np.int32)
+        in_frame = (
+            (pts[:, 0] >= 0)
+            & (pts[:, 0] < width)
+            & (pts[:, 1] >= 0)
+            & (pts[:, 1] < height)
+        )
+        pts = pts[in_frame]
+        if len(pts) < 3:
+            return output
+        hull = cv2.convexHull(pts)
+        cv2.fillConvexPoly(overlay, hull, (60, 220, 255), lineType=cv2.LINE_AA)
+        cv2.fillConvexPoly(mask, hull, 255, lineType=cv2.LINE_AA)
 
     blended = cv2.addWeighted(overlay, 0.5, output, 0.5, 0)
     output[mask > 0] = blended[mask > 0]
-    for point in pts[:: max(1, len(pts) // 220)]:
+    for point in np.round(tracked_points[:: max(1, len(tracked_points) // 220)]).astype(np.int32):
         cv2.circle(output, tuple(point), 4, (20, 20, 20), -1, lineType=cv2.LINE_AA)
         cv2.circle(output, tuple(point), 2, (245, 255, 61), -1, lineType=cv2.LINE_AA)
     return output
@@ -259,7 +317,7 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
     for index, points in enumerate(tracks):
         label = labels[index] if index < len(labels) else f"annotation {index + 1}"
         if label.startswith("obj "):
-            output = draw_obj_mesh(output, points)
+            output = draw_obj_mesh(output, label, points)
 
     for index, points in enumerate(tracks):
         color = colors[index % len(colors)]
@@ -455,13 +513,18 @@ def regroup_visible_points(
     points: np.ndarray,
     group_sizes: list[int],
     visible_points: np.ndarray,
+    labels: list[str] | None = None,
 ) -> list[np.ndarray]:
     grouped: list[np.ndarray] = []
     offset = 0
-    for size in group_sizes:
+    for index, size in enumerate(group_sizes):
         group = points[offset : offset + size]
         group_visible = visible_points[offset : offset + size]
-        grouped.append(group[group_visible].astype(np.float32))
+        label = labels[index] if labels and index < len(labels) else ""
+        if label.startswith("obj "):
+            grouped.append(group.astype(np.float32))
+        else:
+            grouped.append(group[group_visible].astype(np.float32))
         offset += size
     return grouped
 
@@ -839,7 +902,7 @@ def track_with_cotracker3_online(
                     original_rgb,
                     valid_mask,
                 )
-                grouped_tracks = regroup_visible_points(points, group_sizes, visible_points)
+                grouped_tracks = regroup_visible_points(points, group_sizes, visible_points, labels)
             else:
                 grouped_tracks = regroup_points(points, group_sizes)
             emit_tracked_frame(
@@ -893,7 +956,7 @@ def track_with_cotracker3_online(
                         frame_rgb,
                         valid_mask,
                     )
-                    initial_tracks = regroup_visible_points(initial_points, group_sizes, visible_points)
+                    initial_tracks = regroup_visible_points(initial_points, group_sizes, visible_points, labels)
                 else:
                     initial_tracks = tracks
                 emit_tracked_frame(
@@ -1040,7 +1103,7 @@ def track_with_cotracker3_offline(
                         frame_rgb,
                         valid_mask,
                     )
-                    grouped_tracks = regroup_visible_points(points, group_sizes, visible_points)
+                    grouped_tracks = regroup_visible_points(points, group_sizes, visible_points, labels)
                 else:
                     grouped_tracks = regroup_points(points, group_sizes)
                 emit_tracked_frame(
@@ -1154,7 +1217,7 @@ def track_with_litetracker(
                         frame_rgb,
                         valid_mask,
                     )
-                    grouped_tracks = regroup_visible_points(points, group_sizes, visible_points)
+                    grouped_tracks = regroup_visible_points(points, group_sizes, visible_points, labels)
                 else:
                     grouped_tracks = regroup_points(points, group_sizes)
                 emit_tracked_frame(
