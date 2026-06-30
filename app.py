@@ -197,36 +197,28 @@ def obj_tracks_from_projection(
     faces: list[list[int]],
     frame_width: int,
     frame_height: int,
-    max_edges: int,
+    max_faces: int,
 ) -> tuple[list[np.ndarray], list[str]]:
-    if max_edges <= 0 or len(points_xy) == 0:
+    if max_faces <= 0 or len(points_xy) == 0:
         return [], []
-    seen_edges: set[tuple[int, int]] = set()
     tracks: list[np.ndarray] = []
     for face in faces:
         valid_face = [index for index in face if 0 <= index < len(points_xy)]
-        if len(valid_face) < 2:
+        if len(valid_face) < 3:
             continue
-        for start, end in zip(valid_face, valid_face[1:] + valid_face[:1]):
-            edge = tuple(sorted((start, end)))
-            if edge in seen_edges:
-                continue
-            seen_edges.add(edge)
-            segment = points_xy[[start, end]].astype(np.float32)
-            in_frame = (
-                (segment[:, 0] >= 0)
-                & (segment[:, 0] < frame_width)
-                & (segment[:, 1] >= 0)
-                & (segment[:, 1] < frame_height)
-            )
-            if not bool(in_frame.any()):
-                continue
-            tracks.append(segment)
-            if len(tracks) >= max_edges:
-                break
-        if len(tracks) >= max_edges:
+        polygon = points_xy[valid_face].astype(np.float32)
+        in_frame = (
+            (polygon[:, 0] >= 0)
+            & (polygon[:, 0] < frame_width)
+            & (polygon[:, 1] >= 0)
+            & (polygon[:, 1] < frame_height)
+        )
+        if not bool(in_frame.any()):
+            continue
+        tracks.append(polygon)
+        if len(tracks) >= max_faces:
             break
-    labels = [f"obj edge {index}" for index in range(1, len(tracks) + 1)]
+    labels = [f"obj face {index}" for index in range(1, len(tracks) + 1)]
     return tracks, labels
 
 
@@ -1139,9 +1131,9 @@ try:
                     obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
                 with rot_c:
                     obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
-                obj_max_points = st.slider("3D model tracking edges", 5, 500, 80, 5)
+                obj_max_points = st.slider("3D model tracking faces", 5, 300, 80, 5)
                 st.caption(
-                    "This is a 2D orthographic projection of the OBJ. The generated points are tracked like normal points."
+                    "This is a 2D orthographic projection of the OBJ. The generated faces are tracked and rendered as a 50% volume overlay."
                 )
             if not use_mouse_obj_placement:
                 obj_projected_points = project_obj_vertices(
