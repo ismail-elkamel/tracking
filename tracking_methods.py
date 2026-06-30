@@ -214,22 +214,16 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
 
     for index, points in enumerate(tracks):
         color = colors[index % len(colors)]
-        label = labels[index] if index < len(labels) else f"annotation {index + 1}"
-        is_obj_track = label.startswith("obj ")
-        if is_obj_track:
-            color = (245, 255, 61)
         pts = np.round(points).astype(int)
         if len(pts) == 1:
-            if is_obj_track:
-                continue
             cv2.circle(output, tuple(pts[0]), 7, color, -1, lineType=cv2.LINE_AA)
             cv2.circle(output, tuple(pts[0]), 11, (255, 255, 255), 2, lineType=cv2.LINE_AA)
         else:
             closed = len(pts) >= 3
-            cv2.polylines(output, [pts], closed, color, 1 if is_obj_track else 3, lineType=cv2.LINE_AA)
-            if not is_obj_track:
-                for point in pts:
-                    cv2.circle(output, tuple(point), 5, color, -1, lineType=cv2.LINE_AA)
+            cv2.polylines(output, [pts], closed, color, 3, lineType=cv2.LINE_AA)
+            for point in pts:
+                cv2.circle(output, tuple(point), 5, color, -1, lineType=cv2.LINE_AA)
+        label = labels[index] if index < len(labels) else f"annotation {index + 1}"
         if len(pts) and label and not label.startswith(("grid ", "obj ")):
             x, y = pts[0]
             cv2.putText(
