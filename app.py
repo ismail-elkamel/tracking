@@ -201,7 +201,7 @@ def obj_tracks_from_projection(
 ) -> tuple[list[np.ndarray], list[str]]:
     if max_faces <= 0 or len(points_xy) == 0:
         return [], []
-    tracks: list[np.ndarray] = []
+    candidate_faces: list[np.ndarray] = []
     for face in faces:
         valid_face = [index for index in face if 0 <= index < len(points_xy)]
         if len(valid_face) < 3:
@@ -215,9 +215,14 @@ def obj_tracks_from_projection(
         )
         if not bool(in_frame.any()):
             continue
-        tracks.append(polygon)
-        if len(tracks) >= max_faces:
-            break
+        candidate_faces.append(polygon)
+    if not candidate_faces:
+        return [], []
+    if len(candidate_faces) > max_faces:
+        indices = np.linspace(0, len(candidate_faces) - 1, max_faces, dtype=np.int32)
+        tracks = [candidate_faces[int(index)] for index in indices]
+    else:
+        tracks = candidate_faces
     labels = [f"obj face {index}" for index in range(1, len(tracks) + 1)]
     return tracks, labels
 
@@ -1131,9 +1136,9 @@ try:
                     obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
                 with rot_c:
                     obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
-                obj_max_points = st.slider("3D model tracking faces", 5, 300, 80, 5)
+                obj_max_points = st.slider("3D model tracking faces", 50, 3000, 800, 50)
                 st.caption(
-                    "This is a 2D orthographic projection of the OBJ. The generated faces are tracked and rendered as a 50% volume overlay."
+                    "Faces are sampled across the whole OBJ, then rendered as a 50% volume overlay in the output."
                 )
             if not use_mouse_obj_placement:
                 obj_projected_points = project_obj_vertices(
