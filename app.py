@@ -197,34 +197,23 @@ def obj_tracks_from_projection(
     faces: list[list[int]],
     frame_width: int,
     frame_height: int,
-    max_faces: int,
+    max_points: int,
 ) -> tuple[list[np.ndarray], list[str]]:
-    if max_faces <= 0 or len(points_xy) == 0:
+    if max_points <= 0 or len(points_xy) == 0:
         return [], []
-    candidate_faces: list[np.ndarray] = []
-    for face in faces:
-        valid_face = [index for index in face if 0 <= index < len(points_xy)]
-        if len(valid_face) < 3:
-            continue
-        polygon = points_xy[valid_face].astype(np.float32)
-        in_frame = (
-            (polygon[:, 0] >= 0)
-            & (polygon[:, 0] < frame_width)
-            & (polygon[:, 1] >= 0)
-            & (polygon[:, 1] < frame_height)
-        )
-        if not bool(in_frame.any()):
-            continue
-        candidate_faces.append(polygon)
-    if not candidate_faces:
+    in_frame = (
+        (points_xy[:, 0] >= 0)
+        & (points_xy[:, 0] < frame_width)
+        & (points_xy[:, 1] >= 0)
+        & (points_xy[:, 1] < frame_height)
+    )
+    visible_points = points_xy[in_frame].astype(np.float32)
+    if len(visible_points) == 0:
         return [], []
-    if len(candidate_faces) > max_faces:
-        indices = np.linspace(0, len(candidate_faces) - 1, max_faces, dtype=np.int32)
-        tracks = [candidate_faces[int(index)] for index in indices]
-    else:
-        tracks = candidate_faces
-    labels = [f"obj face {index}" for index in range(1, len(tracks) + 1)]
-    return tracks, labels
+    if len(visible_points) > max_points:
+        indices = np.linspace(0, len(visible_points) - 1, max_points, dtype=np.int32)
+        visible_points = visible_points[indices]
+    return [visible_points], ["obj mesh"]
 
 
 def obj_control_box_drawing(width: int, height: int) -> dict[str, Any]:
@@ -1136,9 +1125,9 @@ try:
                     obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
                 with rot_c:
                     obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
-                obj_max_points = st.slider("3D model tracking faces", 50, 3000, 800, 50)
+                obj_max_points = st.slider("3D model tracking points", 50, 3000, 800, 50)
                 st.caption(
-                    "Faces are sampled across the whole OBJ, then rendered as a 50% volume overlay in the output."
+                    "Points are sampled across the whole OBJ, then rendered as a complete 50% mesh overlay in the output."
                 )
             if not use_mouse_obj_placement:
                 obj_projected_points = project_obj_vertices(
@@ -1261,7 +1250,7 @@ try:
                 preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
             st.image(draw_tracks(preview_frame, tracks, labels), channels="RGB", use_container_width=True)
             st.caption(
-                f"{manual_point_count} manual point(s), {obj_track_count} 3D model face(s), "
+                f"{manual_point_count} manual point(s), {obj_track_count} 3D model mesh group(s), "
                 f"{grid_point_count} grid point(s), "
                 f"{sum(len(track) for track in tracks)} total tracked item(s)"
             )
