@@ -177,27 +177,18 @@ def draw_obj_overlay(
     points_xy: np.ndarray,
     faces: list[list[int]],
     color: tuple[int, int, int] = (60, 220, 255),
-    max_edges: int = 300,
-    line_width: int = 1,
 ) -> np.ndarray:
     output = frame_rgb.copy()
     if not len(points_xy):
         return output
-    drawn_edges: set[tuple[int, int]] = set()
-    for face in faces:
+    for face in faces[:8000]:
         valid_face = [index for index in face if 0 <= index < len(points_xy)]
         if len(valid_face) < 2:
             continue
-        for start, end in zip(valid_face, valid_face[1:] + valid_face[:1]):
-            edge = tuple(sorted((start, end)))
-            if edge in drawn_edges:
-                continue
-            drawn_edges.add(edge)
-            p0 = tuple(np.round(points_xy[start]).astype(int))
-            p1 = tuple(np.round(points_xy[end]).astype(int))
-            cv2.line(output, p0, p1, color, line_width, lineType=cv2.LINE_AA)
-            if len(drawn_edges) >= max_edges:
-                return output
+        pts = np.round(points_xy[valid_face]).astype(np.int32)
+        cv2.polylines(output, [pts], True, color, 1, lineType=cv2.LINE_AA)
+    for point in np.round(points_xy[:: max(1, len(points_xy) // 120)]).astype(np.int32):
+        cv2.circle(output, tuple(point), 2, color, -1, lineType=cv2.LINE_AA)
     return output
 
 
@@ -225,13 +216,7 @@ def obj_tracks_from_projection(
     return tracks, labels
 
 
-def obj_wireframe_drawing(
-    points_xy: np.ndarray,
-    faces: list[list[int]],
-    color: str,
-    line_width: int,
-    max_edges: int,
-) -> dict[str, Any]:
+def obj_wireframe_drawing(points_xy: np.ndarray, faces: list[list[int]], max_edges: int = 1600) -> dict[str, Any]:
     path: list[list[float | str]] = []
     seen_edges: set[tuple[int, int]] = set()
     for face in faces:
@@ -266,13 +251,10 @@ def obj_wireframe_drawing(
                 "name": "obj_model_overlay",
                 "path": path,
                 "fill": "",
-                "stroke": color,
-                "strokeWidth": line_width,
-                "opacity": 0.9,
+                "stroke": "#3cdcff",
+                "strokeWidth": 2,
                 "transparentCorners": False,
-                "cornerColor": color,
-                "borderColor": color,
-                "rotatingPointOffset": 32,
+                "cornerColor": "#3cdcff",
             }
         ],
     }
@@ -283,10 +265,10 @@ def obj_placement_from_canvas(
     canvas_scale: float,
     frame_width: int,
     frame_height: int,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float]:
     default_scale = max(40.0, min(frame_width, frame_height) / 4.0)
     if not json_data:
-        return frame_width / 2.0, frame_height / 2.0, default_scale, 0.0
+        return frame_width / 2.0, frame_height / 2.0, default_scale
     for obj in json_data.get("objects", []):
         if obj.get("name") != "obj_model_overlay" and obj.get("type") not in {"rect", "path", "polygon"}:
             continue
@@ -297,16 +279,8 @@ def obj_placement_from_canvas(
         center_x = (left + width / 2.0) / canvas_scale
         center_y = (top + height / 2.0) / canvas_scale
         scale_px = max(10.0, max(width, height) / (2.0 * canvas_scale))
-        angle = float(obj.get("angle", 0.0))
-        return center_x, center_y, scale_px, angle
-    return frame_width / 2.0, frame_height / 2.0, default_scale, 0.0
-
-
-def hex_to_rgb(value: str) -> tuple[int, int, int]:
-    value = value.strip().lstrip("#")
-    if len(value) != 6:
-        return (245, 255, 61)
-    return tuple(int(value[index : index + 2], 16) for index in (0, 2, 4))
+        return center_x, center_y, scale_px
+    return frame_width / 2.0, frame_height / 2.0, default_scale
 
 
 def cleanup_path(path: Path) -> None:
@@ -1137,10 +1111,6 @@ try:
     obj_overlay_enabled = uploaded_obj is not None
     obj_use_main_canvas = False
     obj_max_points = 80
-    obj_wire_color = "#f5ff3d"
-    obj_wire_width = 1
-    obj_wire_edges = 300
-    obj_canvas_rotate_z = 0.0
     if uploaded_obj is not None:
         try:
             obj_vertices, obj_faces = parse_obj_model(uploaded_obj.getvalue())
@@ -1176,16 +1146,9 @@ try:
                     obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
                 with rot_c:
                     obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
-                style_a, style_b, style_c = st.columns(3)
-                with style_a:
-                    obj_wire_color = st.color_picker("3D wire color", "#f5ff3d")
-                with style_b:
-                    obj_wire_width = st.slider("3D line width", 1, 5, 1, 1)
-                with style_c:
-                    obj_wire_edges = st.slider("3D visible edges", 50, 2000, 300, 50)
                 obj_max_points = st.slider("3D model tracking points", 5, 500, 80, 5)
                 st.caption(
-                    "Drag the wireframe to translate it, resize it to zoom, and use the rotation handle above it for mouse rotation."
+                    "When canvas control is enabled, drag the wireframe model itself to translate it and resize it to zoom."
                 )
             if not obj_use_main_canvas:
                 obj_projected_points = project_obj_vertices(
@@ -1202,14 +1165,7 @@ try:
 
     canvas_background = frame_rgb
     if obj_overlay_enabled and obj_projected_points is not None and not obj_use_main_canvas:
-        canvas_background = draw_obj_overlay(
-            frame_rgb,
-            obj_projected_points,
-            obj_faces,
-            color=hex_to_rgb(obj_wire_color),
-            max_edges=obj_wire_edges,
-            line_width=obj_wire_width,
-        )
+        canvas_background = draw_obj_overlay(frame_rgb, obj_projected_points, obj_faces)
 
     display_frame, canvas_scale = resize_for_canvas(canvas_background)
     height, width = display_frame.shape[:2]
@@ -1228,13 +1184,7 @@ try:
             obj_rotate_y,
             obj_rotate_z,
         )
-        initial_drawing = obj_wireframe_drawing(
-            initial_obj_points,
-            obj_faces,
-            color=obj_wire_color,
-            line_width=obj_wire_width,
-            max_edges=obj_wire_edges,
-        )
+        initial_drawing = obj_wireframe_drawing(initial_obj_points, obj_faces)
         canvas_mode = "transform"
         canvas_key_mode = f"obj_transform_{obj_rotate_x}_{obj_rotate_y}_{obj_rotate_z}"
 
@@ -1242,7 +1192,7 @@ try:
     with left:
         st.subheader("Select points or regions")
         if obj_overlay_enabled and obj_use_main_canvas:
-            st.caption("Drag the 3D wireframe to translate it, resize it to zoom, and drag the rotation handle above it to rotate. Disable canvas control to draw manual annotations.")
+            st.caption("Drag the 3D wireframe to translate it. Resize it to zoom. Disable canvas control to draw manual annotations.")
         canvas_result = st_canvas(
             fill_color="rgba(255, 72, 92, 0.20)",
             stroke_width=stroke_width,
@@ -1259,7 +1209,7 @@ try:
         )
 
     if obj_overlay_enabled and obj_use_main_canvas:
-        obj_center_x, obj_center_y, obj_scale, obj_canvas_rotate_z = obj_placement_from_canvas(
+        obj_center_x, obj_center_y, obj_scale = obj_placement_from_canvas(
             canvas_result.json_data,
             canvas_scale,
             frame_width,
@@ -1274,7 +1224,7 @@ try:
             obj_scale,
             obj_rotate_x,
             obj_rotate_y,
-            obj_rotate_z + obj_canvas_rotate_z,
+            obj_rotate_z,
         )
         tracks, labels = [], []
     else:
@@ -1318,14 +1268,7 @@ try:
         if tracks:
             preview_frame = frame_rgb
             if obj_overlay_enabled and obj_projected_points is not None:
-                preview_frame = draw_obj_overlay(
-                    preview_frame,
-                    obj_projected_points,
-                    obj_faces,
-                    color=hex_to_rgb(obj_wire_color),
-                    max_edges=obj_wire_edges,
-                    line_width=obj_wire_width,
-                )
+                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
             st.image(draw_tracks(preview_frame, tracks, labels), channels="RGB", use_container_width=True)
             st.caption(
                 f"{manual_point_count} manual point(s), {obj_track_count} 3D model point(s), "
@@ -1342,14 +1285,7 @@ try:
         else:
             preview_frame = frame_rgb
             if obj_overlay_enabled and obj_projected_points is not None:
-                preview_frame = draw_obj_overlay(
-                    preview_frame,
-                    obj_projected_points,
-                    obj_faces,
-                    color=hex_to_rgb(obj_wire_color),
-                    max_edges=obj_wire_edges,
-                    line_width=obj_wire_width,
-                )
+                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
             st.image(preview_frame, channels="RGB", use_container_width=True)
             st.caption("Draw points, rectangles, or polygons on the left.")
 
