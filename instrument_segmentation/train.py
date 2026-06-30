@@ -147,6 +147,15 @@ class VisdomLogger:
             update="append",
         )
 
+    def images(self, name: str, images: torch.Tensor, caption: str) -> None:
+        if not self.enabled or self.viz is None:
+            return
+        self.viz.images(
+            images.detach().cpu(),
+            win=name,
+            opts={"title": name, "caption": caption},
+        )
+
 
 def run_epoch(
     model: nn.Module,
@@ -208,6 +217,68 @@ def run_epoch(
     return metrics
 
 
+def denormalize_images(images: torch.Tensor) -> torch.Tensor:
+    mean = torch.tensor([0.485, 0.456, 0.406], device=images.device).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=images.device).view(1, 3, 1, 1)
+    return (images * std + mean).clamp(0.0, 1.0)
+
+
+def make_prediction_panels(
+    images: torch.Tensor,
+    masks: torch.Tensor,
+    logits: torch.Tensor,
+    threshold: float = 0.5,
+) -> torch.Tensor:
+    images = denormalize_images(images)
+    masks = (masks > 0.5).float()
+    preds = (torch.sigmoid(logits) >= threshold).float()
+
+    green = torch.tensor([0.0, 1.0, 0.0], device=images.device).view(1, 3, 1, 1)
+    red = torch.tensor([1.0, 0.0, 0.0], device=images.device).view(1, 3, 1, 1)
+    gt_overlay = (images * 0.65 + green * 0.35 * masks).clamp(0.0, 1.0)
+    pred_overlay = (images * 0.65 + red * 0.35 * preds).clamp(0.0, 1.0)
+    return torch.cat([images, gt_overlay, pred_overlay], dim=3)
+
+
+def log_test_prediction_examples(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    use_amp: bool,
+    visdom_logger: VisdomLogger,
+    max_images: int,
+) -> None:
+    if max_images <= 0 or not visdom_logger.enabled:
+        return
+
+    model.eval()
+    panels: list[torch.Tensor] = []
+    with torch.inference_mode():
+        for images, masks in loader:
+            images = images.to(device, non_blocking=True)
+            masks = masks.to(device, non_blocking=True)
+            with autocast(device_type=device.type, enabled=use_amp):
+                logits = model(images)
+                if logits.shape[-2:] != masks.shape[-2:]:
+                    logits = nn.functional.interpolate(
+                        logits,
+                        size=masks.shape[-2:],
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+            batch_panels = make_prediction_panels(images, masks, logits)
+            panels.extend(batch_panels.detach().cpu())
+            if len(panels) >= max_images:
+                break
+
+    if panels:
+        visdom_logger.images(
+            "test_predictions",
+            torch.stack(panels[:max_images]),
+            "Each panel: original | ground truth in green | prediction in red",
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train an instrument-only segmentation model.")
     parser.add_argument("--data-root", default="data/Instrument segmentation")
@@ -238,6 +309,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visdom", action="store_true")
     parser.add_argument("--visdom-port", type=int, default=8097)
     parser.add_argument("--visdom-env", default="instrument_segmentation")
+    parser.add_argument("--visdom-test-images", type=int, default=4)
     parser.add_argument("--export-onnx", action="store_true")
     parser.add_argument("--onnx-output", default=None)
     return parser.parse_args()
@@ -361,6 +433,14 @@ def main() -> None:
     checkpoint = torch.load(best_checkpoint, map_location=device)
     model.load_state_dict(checkpoint["state_dict"])
     test_metrics = run_epoch(model, test_loader, None, device, scaler, use_amp, loss_fn, phase="test")
+    log_test_prediction_examples(
+        model,
+        test_loader,
+        device,
+        use_amp,
+        visdom_logger,
+        args.visdom_test_images,
+    )
     print(
         "test "
         f"loss={test_metrics['loss']:.4f} dice={test_metrics['dice']:.4f} "
