@@ -223,9 +223,9 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
         pts = np.round(points).astype(int)
         if is_obj_track:
             if len(pts) >= 3:
-                cv2.fillPoly(obj_overlay, [pts], (245, 255, 61), lineType=cv2.LINE_AA)
+                cv2.fillPoly(obj_overlay, [pts], (60, 220, 255), lineType=cv2.LINE_AA)
                 cv2.fillPoly(obj_mask, [pts], 255, lineType=cv2.LINE_AA)
-                cv2.polylines(obj_overlay, [pts], True, (245, 255, 61), 1, lineType=cv2.LINE_AA)
+                cv2.polylines(obj_overlay, [pts], True, (60, 220, 255), 1, lineType=cv2.LINE_AA)
                 for point in pts:
                     obj_points.append((int(point[0]), int(point[1])))
                 has_obj_overlay = True
@@ -253,7 +253,7 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
     if has_obj_overlay:
         blended = cv2.addWeighted(obj_overlay, 0.5, output, 0.5, 0)
         output[obj_mask > 0] = blended[obj_mask > 0]
-        for point in obj_points[:: max(1, len(obj_points) // 120)]:
+        for point in obj_points[:: max(1, len(obj_points) // 220)]:
             cv2.circle(output, point, 4, (20, 20, 20), -1, lineType=cv2.LINE_AA)
             cv2.circle(output, point, 2, (245, 255, 61), -1, lineType=cv2.LINE_AA)
 
