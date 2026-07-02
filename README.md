@@ -439,6 +439,13 @@ The Streamlit app can load an `.obj` model and project it onto the selected star
 
 After uploading, use the `3D model placement` controls to move, scale, and rotate the model. With `Move/zoom 3D model with mouse` enabled, the blue placement box appears next to the point/region annotation canvas: drag the box to translate the model and resize it to zoom. Rotations stay available as sliders. The combined preview is shown below those controls at the same column width. The app tracks visible projected OBJ points as anchors, estimates a global transform from them, and redraws the complete OBJ geometry in the final video as a 50% opacity cyan overlay. Displayed OBJ anchor dots are reprojected from that global model transform, so they stay attached to the 3D model instead of drifting outside it. Regular tracking points stay visible on top, and `Compare models` still works.
 
+Use `3D overlay transform` to choose how the full OBJ follows the tracked anchors:
+
+- `PnP`: estimates a 3D pose from OBJ vertex coordinates to tracked 2D anchors, then reprojects the complete OBJ. This is the best first choice for keeping the model coherent during zoom or camera/viewpoint changes.
+- `Similarity`: older 2D fallback using translation, rotation, and scale. Use it if PnP becomes unstable on a difficult clip.
+
+PnP uses an approximate camera matrix from the video size when no calibration is available. For better registration later, replace that approximation with real laparoscope camera intrinsics.
+
 Current behavior is a lightweight 2D orthographic projection for interactive testing. It is useful for quickly checking whether point tracking can keep a coarse model overlay aligned, but it is not yet a camera-calibrated 3D registration pipeline.
 
 ## Tracking Drift Filters
