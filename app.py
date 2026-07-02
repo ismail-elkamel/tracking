@@ -261,9 +261,13 @@ def obj_tracks_from_projection(
 def obj_tracks_from_manual_points(
     manual_tracks: list[np.ndarray],
     points_xy: np.ndarray,
+    max_snap_distance: float | None = None,
 ) -> tuple[list[np.ndarray], list[str], np.ndarray]:
     if len(points_xy) == 0:
         return [], [], np.empty(0, dtype=np.int32)
+    if max_snap_distance is None:
+        model_size = np.linalg.norm(points_xy.max(axis=0) - points_xy.min(axis=0))
+        max_snap_distance = min(60.0, max(25.0, float(model_size) * 0.04))
     anchors: list[np.ndarray] = []
     anchor_indices: list[int] = []
     for track in manual_tracks:
@@ -272,6 +276,8 @@ def obj_tracks_from_manual_points(
         point = track[0].astype(np.float32)
         distances = np.linalg.norm(points_xy - point, axis=1)
         nearest_index = int(np.argmin(distances))
+        if float(distances[nearest_index]) > max_snap_distance:
+            continue
         anchors.append(point)
         anchor_indices.append(nearest_index)
     if not anchors:
@@ -1157,7 +1163,7 @@ try:
     obj_anchor_source = "Manual points on model"
     obj_transform_mode = "PnP"
     obj_pnp_reprojection_error = 8.0
-    obj_pnp_min_inliers = 20
+    obj_pnp_min_inliers = 6
     obj_show_anchor_points = True
     obj_model_points_3d = np.empty((0, 3), dtype=np.float32)
     if uploaded_obj is not None:
@@ -1216,7 +1222,7 @@ try:
                             "PnP min inliers",
                             6,
                             200,
-                            20,
+                            6,
                             1,
                             help="Minimum good anchors required before accepting the PnP pose.",
                         )
@@ -1332,10 +1338,15 @@ try:
         tracks, labels = [], []
     if obj_overlay_enabled and obj_projected_points is not None:
         if obj_anchor_source == "Manual points on model":
+            manual_single_point_count = sum(1 for track in manual_tracks if len(track) == 1)
             obj_tracks, obj_labels, obj_anchor_indices = obj_tracks_from_manual_points(
                 manual_tracks,
                 obj_projected_points,
             )
+            accepted_anchor_count = len(obj_tracks[0]) if obj_tracks else 0
+            if manual_single_point_count > accepted_anchor_count:
+                ignored_count = manual_single_point_count - accepted_anchor_count
+                st.warning(f"{ignored_count} manual point(s) were too far from the 3D model and were ignored.")
             if not obj_tracks:
                 st.info("Draw point annotations on the 3D model to create manual OBJ anchors.")
             elif obj_transform_mode == "PnP" and len(obj_tracks[0]) < max(6, obj_pnp_min_inliers):
