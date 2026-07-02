@@ -253,9 +253,12 @@ def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray
         return None
     source = metadata.anchor_points
     target = tracked_points.astype(np.float32)
-    if len(source) < 2 or len(target) < 2:
+    if len(source) < 1 or len(target) < 1:
         return None
     count = min(len(source), len(target))
+    if count == 1:
+        dx, dy = (target[0] - source[0]).astype(float)
+        return np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
     transform, _ = cv2.estimateAffinePartial2D(
         source[:count],
         target[:count],
