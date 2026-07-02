@@ -59,6 +59,7 @@ class ObjOverlayMetadata:
     pnp_reprojection_error: float = 8.0
     pnp_min_inliers: int = 6
     show_anchor_points: bool = True
+    render_style: str = "Wireframe"
 
 
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
@@ -76,6 +77,7 @@ def register_obj_overlay(
     pnp_reprojection_error: float = 8.0,
     pnp_min_inliers: int = 6,
     show_anchor_points: bool = True,
+    render_style: str = "Wireframe",
 ) -> None:
     OBJ_OVERLAYS[label] = ObjOverlayMetadata(
         anchor_points=anchor_points.astype(np.float32),
@@ -89,6 +91,7 @@ def register_obj_overlay(
         pnp_reprojection_error=float(pnp_reprojection_error),
         pnp_min_inliers=int(pnp_min_inliers),
         show_anchor_points=bool(show_anchor_points),
+        render_style=render_style,
     )
 
 
@@ -410,6 +413,40 @@ def draw_obj_mesh(output: np.ndarray, label: str, tracked_points: np.ndarray) ->
         return output
 
     height, width = output.shape[:2]
+    render_style = metadata.render_style if metadata is not None else "Wireframe"
+    if render_style == "Wireframe":
+        rendered_faces = 0
+        for face in faces:
+            valid_face = [index for index in face if 0 <= index < len(points)]
+            if len(valid_face) < 2:
+                continue
+            polygon = np.round(points[valid_face]).astype(np.int32)
+            in_frame = (
+                (polygon[:, 0] >= 0)
+                & (polygon[:, 0] < width)
+                & (polygon[:, 1] >= 0)
+                & (polygon[:, 1] < height)
+            )
+            if not bool(in_frame.any()):
+                continue
+            cv2.polylines(output, [polygon], True, (60, 220, 255), 1, lineType=cv2.LINE_AA)
+            rendered_faces += 1
+        if rendered_faces == 0:
+            pts = np.round(points).astype(np.int32)
+            in_frame = (
+                (pts[:, 0] >= 0)
+                & (pts[:, 0] < width)
+                & (pts[:, 1] >= 0)
+                & (pts[:, 1] < height)
+            )
+            for point in pts[in_frame][:: max(1, len(pts) // 1000)]:
+                cv2.circle(output, tuple(point), 1, (60, 220, 255), -1, lineType=cv2.LINE_AA)
+        if metadata is None or metadata.show_anchor_points:
+            for point in np.round(anchor_points[:: max(1, len(anchor_points) // 260)]).astype(np.int32):
+                if 0 <= point[0] < width and 0 <= point[1] < height:
+                    cv2.circle(output, tuple(point), 6, (255, 72, 92), 2, lineType=cv2.LINE_AA)
+        return output
+
     overlay = output.copy()
     mask = np.zeros((height, width), dtype=np.uint8)
     rendered_faces = 0
@@ -450,8 +487,8 @@ def draw_obj_mesh(output: np.ndarray, label: str, tracked_points: np.ndarray) ->
     output[mask > 0] = blended[mask > 0]
     if metadata is None or metadata.show_anchor_points:
         for point in np.round(anchor_points[:: max(1, len(anchor_points) // 220)]).astype(np.int32):
-            cv2.circle(output, tuple(point), 4, (20, 20, 20), -1, lineType=cv2.LINE_AA)
-            cv2.circle(output, tuple(point), 2, (245, 255, 61), -1, lineType=cv2.LINE_AA)
+            if 0 <= point[0] < width and 0 <= point[1] < height:
+                cv2.circle(output, tuple(point), 6, (255, 72, 92), 2, lineType=cv2.LINE_AA)
     return output
 
 
