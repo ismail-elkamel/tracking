@@ -198,6 +198,7 @@ def obj_tracks_from_projection(
     frame_width: int,
     frame_height: int,
     max_points: int,
+    edge_fraction: float = 0.45,
 ) -> tuple[list[np.ndarray], list[str], np.ndarray]:
     if max_points <= 0 or len(points_xy) == 0:
         return [], [], np.empty(0, dtype=np.int32)
@@ -212,7 +213,58 @@ def obj_tracks_from_projection(
     if len(visible_points) == 0:
         return [], [], np.empty(0, dtype=np.int32)
     if len(visible_points) > max_points:
-        indices = np.linspace(0, len(visible_points) - 1, max_points, dtype=np.int32)
+        selected_local_indices: list[int] = []
+        visible_lookup = {int(vertex_index): local_index for local_index, vertex_index in enumerate(visible_indices)}
+        edge_budget = max(6, min(max_points, int(round(max_points * edge_fraction))))
+        if faces and len(visible_points) >= 3:
+            hull = cv2.convexHull(visible_points, returnPoints=False)
+            if hull is not None:
+                selected_local_indices.extend(int(index) for index in hull.reshape(-1).tolist())
+
+        if len(selected_local_indices) < edge_budget:
+            candidate_edge_indices: set[int] = set(selected_local_indices)
+            for face in faces:
+                face_local = [visible_lookup[index] for index in face if index in visible_lookup]
+                if len(face_local) < 2:
+                    continue
+                face_points = visible_points[face_local]
+                face_center = face_points.mean(axis=0)
+                distances = np.linalg.norm(face_points - face_center, axis=1)
+                for local_index in np.asarray(face_local)[np.argsort(-distances)[:2]]:
+                    candidate_edge_indices.add(int(local_index))
+            if candidate_edge_indices:
+                ranked = sorted(
+                    candidate_edge_indices,
+                    key=lambda index: float(
+                        min(
+                            visible_points[index, 0],
+                            visible_points[index, 1],
+                            frame_width - 1 - visible_points[index, 0],
+                            frame_height - 1 - visible_points[index, 1],
+                        )
+                    ),
+                )
+                selected_local_indices.extend(ranked[:edge_budget])
+
+        selected_unique: list[int] = []
+        seen: set[int] = set()
+        for index in selected_local_indices:
+            if 0 <= index < len(visible_points) and index not in seen:
+                selected_unique.append(index)
+                seen.add(index)
+            if len(selected_unique) >= edge_budget:
+                break
+
+        remaining_budget = max_points - len(selected_unique)
+        if remaining_budget > 0:
+            remaining = np.array([index for index in range(len(visible_points)) if index not in seen], dtype=np.int32)
+            if len(remaining) > remaining_budget:
+                sampled = remaining[np.linspace(0, len(remaining) - 1, remaining_budget, dtype=np.int32)]
+            else:
+                sampled = remaining
+            selected_unique.extend(int(index) for index in sampled.tolist())
+
+        indices = np.asarray(selected_unique[:max_points], dtype=np.int32)
         visible_points = visible_points[indices]
         visible_indices = visible_indices[indices]
     return [visible_points], ["obj mesh"], visible_indices
