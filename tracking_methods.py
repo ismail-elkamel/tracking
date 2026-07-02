@@ -410,7 +410,31 @@ def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.nda
     return apply_obj_transform(metadata.model_points, transform)
 
 
-def draw_obj_mesh(output: np.ndarray, label: str, tracked_points: np.ndarray) -> np.ndarray:
+def apply_instrument_occlusion(
+    output: np.ndarray,
+    base_frame: np.ndarray,
+    instrument_mask: np.ndarray | None,
+) -> np.ndarray:
+    if instrument_mask is None:
+        return output
+    mask = instrument_mask.astype(bool, copy=False)
+    if mask.shape[:2] != output.shape[:2]:
+        mask = cv2.resize(
+            mask.astype(np.uint8),
+            (output.shape[1], output.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+    output[mask] = base_frame[mask]
+    return output
+
+
+def draw_obj_mesh(
+    output: np.ndarray,
+    label: str,
+    tracked_points: np.ndarray,
+    instrument_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    base_frame = output.copy()
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is not None and metadata.transform_mode == "PnP":
         points = project_obj_with_pnp(label, tracked_points)
@@ -457,7 +481,7 @@ def draw_obj_mesh(output: np.ndarray, label: str, tracked_points: np.ndarray) ->
             for point in np.round(anchor_points[:: max(1, len(anchor_points) // 260)]).astype(np.int32):
                 if 0 <= point[0] < width and 0 <= point[1] < height:
                     cv2.circle(output, tuple(point), 6, (255, 72, 92), 2, lineType=cv2.LINE_AA)
-        return output
+        return apply_instrument_occlusion(output, base_frame, instrument_mask)
 
     overlay = output.copy()
     mask = np.zeros((height, width), dtype=np.uint8)
@@ -501,10 +525,15 @@ def draw_obj_mesh(output: np.ndarray, label: str, tracked_points: np.ndarray) ->
         for point in np.round(anchor_points[:: max(1, len(anchor_points) // 220)]).astype(np.int32):
             if 0 <= point[0] < width and 0 <= point[1] < height:
                 cv2.circle(output, tuple(point), 6, (255, 72, 92), 2, lineType=cv2.LINE_AA)
-    return output
+    return apply_instrument_occlusion(output, base_frame, instrument_mask)
 
 
-def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[str]) -> np.ndarray:
+def draw_tracks(
+    frame_rgb: np.ndarray,
+    tracks: list[np.ndarray],
+    labels: list[str],
+    instrument_mask: np.ndarray | None = None,
+) -> np.ndarray:
     output = frame_rgb.copy()
     colors = [
         (255, 72, 92),
@@ -518,7 +547,7 @@ def draw_tracks(frame_rgb: np.ndarray, tracks: list[np.ndarray], labels: list[st
     for index, points in enumerate(tracks):
         label = labels[index] if index < len(labels) else f"annotation {index + 1}"
         if label.startswith("obj "):
-            output = draw_obj_mesh(output, label, points)
+            output = draw_obj_mesh(output, label, points, instrument_mask)
 
     for index, points in enumerate(tracks):
         color = colors[index % len(colors)]
@@ -776,8 +805,9 @@ def emit_tracked_frame(
     output_writer,
     show_live_preview: bool,
     frame_placeholder,
+    instrument_mask: np.ndarray | None = None,
 ) -> None:
-    drawn = draw_tracks(frame_rgb, tracks, labels)
+    drawn = draw_tracks(frame_rgb, tracks, labels, instrument_mask)
     write_output_frame(output_writer, drawn)
     if show_live_preview:
         frame_placeholder.image(drawn, channels="RGB", use_container_width=True)
@@ -1086,6 +1116,7 @@ def track_with_cotracker3_online(
             if predicted_index >= len(predicted):
                 predicted_index = local_index
             points = predicted[predicted_index] / model_scale
+            instrument_mask = None
             if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                 instrument_mask = predict_instrument_mask(original_rgb, instrument_avoidance)
                 valid_mask = points_outside_instrument(points, instrument_mask)
@@ -1113,6 +1144,7 @@ def track_with_cotracker3_online(
                 output_writer,
                 show_live_preview,
                 frame_placeholder,
+                instrument_mask,
             )
             status_placeholder.caption(
                 f"CoTracker3 frame {absolute_frame} / {end_frame} on {device}"
@@ -1167,6 +1199,7 @@ def track_with_cotracker3_online(
                     output_writer,
                     show_live_preview,
                     frame_placeholder,
+                    instrument_mask if instrument_avoidance is not None else None,
                 )
             window.append((absolute_frame, model_rgb, frame_rgb))
             if len(window) > step * 2:
@@ -1285,6 +1318,7 @@ def track_with_cotracker3_offline(
 
             for relative_frame, frame_rgb in enumerate(original_frames):
                 points = predicted[relative_frame]
+                instrument_mask = None
                 if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                     valid_mask = visibility[relative_frame] if visibility is not None else np.ones(len(points), dtype=bool)
                     if instrument_avoidance is not None:
@@ -1314,6 +1348,7 @@ def track_with_cotracker3_offline(
                     output_writer,
                     show_live_preview,
                     frame_placeholder,
+                    instrument_mask,
                 )
                 rendered_frame = chunk_start + relative_frame
                 status_placeholder.caption(
@@ -1401,6 +1436,7 @@ def track_with_litetracker(
                 )
                 coords, _, _ = model(frame_tensor, queries=queries)
                 points = coords[0, -1].detach().cpu().numpy() / model_scale
+                instrument_mask = None
                 if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                     instrument_mask = predict_instrument_mask(frame_rgb, instrument_avoidance)
                     valid_mask = points_outside_instrument(points, instrument_mask)
@@ -1428,6 +1464,7 @@ def track_with_litetracker(
                     output_writer,
                     show_live_preview,
                     frame_placeholder,
+                    instrument_mask,
                 )
                 status_placeholder.caption(
                     f"LiteTracker frame {absolute_frame} / {end_frame} on {device}"
@@ -1481,6 +1518,7 @@ def track_with_lk(
     rgb = cv2.cvtColor(previous_bgr, cv2.COLOR_BGR2RGB)
     output_writer = open_output_writer(output_path, rgb, fps)
     saved_path = Path(output_path) if output_path else None
+    instrument_mask = None
     if instrument_avoidance is not None or track_validation is not None:
         instrument_mask = predict_instrument_mask(rgb, instrument_avoidance)
         for index, points in enumerate(active_tracks):
@@ -1496,7 +1534,15 @@ def track_with_lk(
         points[visible_tracks[index]]
         for index, points in enumerate(active_tracks)
     ] if freeze_lost or instrument_avoidance is not None or track_validation is not None else active_tracks
-    emit_tracked_frame(rgb, displayed_tracks, labels, output_writer, show_live_preview, frame_placeholder)
+    emit_tracked_frame(
+        rgb,
+        displayed_tracks,
+        labels,
+        output_writer,
+        show_live_preview,
+        frame_placeholder,
+        instrument_mask,
+    )
 
     try:
         while current_frame < end_frame:
@@ -1508,6 +1554,7 @@ def track_with_lk(
 
             next_gray = cv2.cvtColor(next_bgr, cv2.COLOR_BGR2GRAY)
             next_rgb = cv2.cvtColor(next_bgr, cv2.COLOR_BGR2RGB)
+            instrument_mask = predict_instrument_mask(next_rgb, instrument_avoidance)
             for index, points in enumerate(active_tracks):
                 if len(points) == 0:
                     continue
@@ -1525,7 +1572,6 @@ def track_with_lk(
                     if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                         valid_mask = status
                         if instrument_avoidance is not None:
-                            instrument_mask = predict_instrument_mask(next_rgb, instrument_avoidance)
                             valid_mask = valid_mask & points_outside_instrument(candidate_points, instrument_mask)
                         valid_mask = validate_tracked_points(
                             candidate_points,
@@ -1561,6 +1607,7 @@ def track_with_lk(
                 output_writer,
                 show_live_preview,
                 frame_placeholder,
+                instrument_mask,
             )
             status_placeholder.caption(f"Tracking frame {current_frame} / {end_frame}")
             if show_live_preview:
