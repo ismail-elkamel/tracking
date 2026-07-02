@@ -444,7 +444,14 @@ Use `3D overlay transform` to choose how the full OBJ follows the tracked anchor
 - `PnP`: estimates a 3D pose from OBJ vertex coordinates to tracked 2D anchors, then reprojects the complete OBJ. This is the best first choice for keeping the model coherent during zoom or camera/viewpoint changes.
 - `Similarity`: older 2D fallback using translation, rotation, and scale. Use it if PnP becomes unstable on a difficult clip.
 
-PnP uses an approximate camera matrix from the video size when no calibration is available. For better registration later, replace that approximation with real laparoscope camera intrinsics.
+PnP uses an approximate camera matrix from the video size when no calibration is available. For better registration later, replace that approximation with real laparoscope camera intrinsics. The PnP controls let you tune the pose robustness:
+
+- `PnP reprojection error px`: increase it if good points are rejected because tracking is noisy; decrease it if the model jumps because bad points are accepted.
+- `PnP min inliers`: minimum number of good tracked anchors needed before the app accepts the PnP pose. If this is too high, the app falls back to the 2D similarity transform more often.
+- `3D model tracking points`: number of visible OBJ anchors sent to the tracker. More points make PnP more stable, but also make tracking slower.
+- `Show 3D anchor points in output`: keep it enabled when debugging registration; disable it when you only want the 50% opacity OBJ volume in the final video.
+
+The preview and final video render all OBJ faces instead of only the first faces, so dense kidney meshes should appear as the full projected model.
 
 Current behavior is a lightweight 2D orthographic projection for interactive testing. It is useful for quickly checking whether point tracking can keep a coarse model overlay aligned, but it is not yet a camera-calibrated 3D registration pipeline.
 
