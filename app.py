@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -95,9 +96,85 @@ TRACKER_OPTIONS = [
 ]
 
 
-def parse_obj_model(obj_bytes: bytes) -> tuple[np.ndarray, list[list[int]]]:
+@dataclass(frozen=True)
+class ObjMeshPart:
+    name: str
+    vertices: np.ndarray
+    faces: list[list[int]]
+    vertex_colors: np.ndarray
+    face_colors: list[tuple[int, int, int]]
+
+
+def clamp_rgb(values: list[float]) -> tuple[int, int, int]:
+    if max(values) <= 1.0:
+        values = [value * 255.0 for value in values]
+    return tuple(int(np.clip(round(value), 0, 255)) for value in values[:3])
+
+
+def default_obj_color(name: str, index: int = 0) -> tuple[int, int, int]:
+    lowered = name.lower()
+    if any(token in lowered for token in ["artere", "artère", "artery", "aorte", "aorta"]):
+        return (255, 72, 92)
+    if any(token in lowered for token in ["veine", "vein"]):
+        return (72, 160, 255)
+    if any(token in lowered for token in ["tumor", "tumeur"]):
+        return (255, 96, 210)
+    if "cortex" in lowered:
+        return (255, 188, 76)
+    if any(token in lowered for token in ["rein", "kidney"]):
+        return (60, 220, 255)
+    palette = [
+        (60, 220, 255),
+        (255, 188, 76),
+        (255, 96, 210),
+        (72, 160, 255),
+        (118, 214, 90),
+        (210, 120, 255),
+    ]
+    return palette[index % len(palette)]
+
+
+def material_color(material_name: str, fallback_color: tuple[int, int, int]) -> tuple[int, int, int]:
+    if not material_name:
+        return fallback_color
+    digest = hashlib.sha1(material_name.encode("utf-8", errors="ignore")).digest()
+    return (
+        int(80 + digest[0] % 176),
+        int(80 + digest[1] % 176),
+        int(80 + digest[2] % 176),
+    )
+
+
+def parse_mtl_colors(mtl_bytes: bytes) -> dict[str, tuple[int, int, int]]:
+    colors: dict[str, tuple[int, int, int]] = {}
+    current_material = ""
+    text = mtl_bytes.decode("utf-8", errors="ignore")
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if parts[0] == "newmtl" and len(parts) >= 2:
+            current_material = parts[1]
+        elif parts[0] == "Kd" and current_material and len(parts) >= 4:
+            try:
+                colors[current_material] = clamp_rgb([float(parts[1]), float(parts[2]), float(parts[3])])
+            except ValueError:
+                continue
+    return colors
+
+
+def parse_obj_model(
+    obj_bytes: bytes,
+    name: str = "model.obj",
+    fallback_color: tuple[int, int, int] = (60, 220, 255),
+    material_colors: dict[str, tuple[int, int, int]] | None = None,
+) -> ObjMeshPart:
     vertices: list[list[float]] = []
+    vertex_colors: list[tuple[int, int, int] | None] = []
     faces: list[list[int]] = []
+    face_material_colors: list[tuple[int, int, int]] = []
+    current_color = fallback_color
     text = obj_bytes.decode("utf-8", errors="ignore")
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -109,6 +186,15 @@ def parse_obj_model(obj_bytes: bytes) -> tuple[np.ndarray, list[list[int]]]:
                 vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
             except ValueError:
                 continue
+            color: tuple[int, int, int] | None = None
+            if len(parts) >= 7:
+                try:
+                    color = clamp_rgb([float(parts[4]), float(parts[5]), float(parts[6])])
+                except ValueError:
+                    color = None
+            vertex_colors.append(color)
+        elif parts[0] == "usemtl" and len(parts) >= 2:
+            current_color = (material_colors or {}).get(parts[1], material_color(parts[1], fallback_color))
         elif parts[0] == "f" and len(parts) >= 4:
             face: list[int] = []
             for token in parts[1:]:
@@ -127,9 +213,61 @@ def parse_obj_model(obj_bytes: bytes) -> tuple[np.ndarray, list[list[int]]]:
                     face.append(index)
             if len(face) >= 3:
                 faces.append(face)
+                face_material_colors.append(current_color)
     if not vertices:
         raise RuntimeError("The OBJ file does not contain any vertices.")
-    return np.asarray(vertices, dtype=np.float32), faces
+    resolved_vertex_colors = np.asarray(
+        [color if color is not None else fallback_color for color in vertex_colors],
+        dtype=np.uint8,
+    )
+    face_colors: list[tuple[int, int, int]] = []
+    has_vertex_colors = any(color is not None for color in vertex_colors)
+    for face, material_rgb in zip(faces, face_material_colors):
+        if has_vertex_colors:
+            valid_indices = [index for index in face if 0 <= index < len(resolved_vertex_colors)]
+            if valid_indices:
+                average = resolved_vertex_colors[valid_indices].astype(np.float32).mean(axis=0)
+                face_colors.append(tuple(int(value) for value in np.clip(np.round(average), 0, 255)))
+                continue
+        face_colors.append(material_rgb)
+    return ObjMeshPart(
+        name=name,
+        vertices=np.asarray(vertices, dtype=np.float32),
+        faces=faces,
+        vertex_colors=resolved_vertex_colors,
+        face_colors=face_colors,
+    )
+
+
+def combine_obj_meshes(meshes: list[ObjMeshPart]) -> ObjMeshPart:
+    if not meshes:
+        return ObjMeshPart(
+            name="combined.obj",
+            vertices=np.empty((0, 3), dtype=np.float32),
+            faces=[],
+            vertex_colors=np.empty((0, 3), dtype=np.uint8),
+            face_colors=[],
+        )
+
+    vertices: list[np.ndarray] = []
+    vertex_colors: list[np.ndarray] = []
+    faces: list[list[int]] = []
+    face_colors: list[tuple[int, int, int]] = []
+    offset = 0
+    for mesh in meshes:
+        vertices.append(mesh.vertices)
+        vertex_colors.append(mesh.vertex_colors)
+        faces.extend([[index + offset for index in face] for face in mesh.faces])
+        face_colors.extend(mesh.face_colors)
+        offset += len(mesh.vertices)
+
+    return ObjMeshPart(
+        name=" + ".join(mesh.name for mesh in meshes),
+        vertices=np.concatenate(vertices, axis=0).astype(np.float32),
+        faces=faces,
+        vertex_colors=np.concatenate(vertex_colors, axis=0).astype(np.uint8),
+        face_colors=face_colors,
+    )
 
 
 def normalize_obj_vertices(vertices: np.ndarray) -> np.ndarray:
@@ -172,21 +310,41 @@ def project_obj_vertices(
     return projected
 
 
+def project_normalized_obj_vertices(
+    normalized_vertices: np.ndarray,
+    frame_width: int,
+    frame_height: int,
+    center_x: float,
+    center_y: float,
+    scale_px: float,
+) -> np.ndarray:
+    projected = np.empty((len(normalized_vertices), 2), dtype=np.float32)
+    projected[:, 0] = float(center_x) + normalized_vertices[:, 0] * float(scale_px)
+    projected[:, 1] = float(center_y) - normalized_vertices[:, 1] * float(scale_px)
+    projected[:, 0] = np.clip(projected[:, 0], -frame_width, frame_width * 2)
+    projected[:, 1] = np.clip(projected[:, 1], -frame_height, frame_height * 2)
+    return projected
+
+
 def draw_obj_overlay(
     frame_rgb: np.ndarray,
     points_xy: np.ndarray,
     faces: list[list[int]],
+    face_colors: list[tuple[int, int, int]] | None = None,
     color: tuple[int, int, int] = (60, 220, 255),
 ) -> np.ndarray:
     output = frame_rgb.copy()
     if not len(points_xy):
         return output
-    for face in faces:
+    for face_index, face in enumerate(faces):
         valid_face = [index for index in face if 0 <= index < len(points_xy)]
         if len(valid_face) < 2:
             continue
         pts = np.round(points_xy[valid_face]).astype(np.int32)
-        cv2.polylines(output, [pts], True, color, 1, lineType=cv2.LINE_AA)
+        face_color = color
+        if face_colors is not None and face_index < len(face_colors):
+            face_color = face_colors[face_index]
+        cv2.polylines(output, [pts], True, face_color, 1, lineType=cv2.LINE_AA)
     for point in np.round(points_xy[:: max(1, len(points_xy) // 120)]).astype(np.int32):
         cv2.circle(output, tuple(point), 2, color, -1, lineType=cv2.LINE_AA)
     return output
@@ -913,7 +1071,11 @@ if st.session_state.get("model_cache_version") != "instrument_avoidance_v1":
 
 with st.sidebar:
     uploaded = st.file_uploader("Video", type=["mp4", "mov", "avi", "mkv"])
-    uploaded_obj = st.file_uploader("3D model overlay (.obj)", type=["obj"])
+    uploaded_objs = st.file_uploader(
+        "3D model overlays (.obj, optional .mtl)",
+        type=["obj", "mtl"],
+        accept_multiple_files=True,
+    )
     mode = st.radio("Annotation", ["point", "rect", "polygon"], horizontal=True)
     stroke_width = st.slider("Line width", 1, 8, 3)
     stroke_color = st.color_picker("Color", "#ff485c")
@@ -1156,8 +1318,10 @@ try:
     frame_height, frame_width = frame_rgb.shape[:2]
     obj_projected_points: np.ndarray | None = None
     obj_faces: list[list[int]] = []
+    obj_face_colors: list[tuple[int, int, int]] = []
     obj_track_count = 0
-    obj_overlay_enabled = uploaded_obj is not None
+    obj_mesh_count = 0
+    obj_overlay_enabled = bool(uploaded_objs)
     use_mouse_obj_placement = False
     obj_max_points = 80
     obj_edge_fraction = 0.85
@@ -1168,13 +1332,53 @@ try:
     obj_show_anchor_points = False
     obj_render_style = "Wireframe"
     obj_model_points_3d = np.empty((0, 3), dtype=np.float32)
-    if uploaded_obj is not None:
-        try:
-            obj_vertices, obj_faces = parse_obj_model(uploaded_obj.getvalue())
-        except RuntimeError as error:
-            st.error(str(error))
+    obj_vertices = np.empty((0, 3), dtype=np.float32)
+    obj_normalized_vertices = np.empty((0, 3), dtype=np.float32)
+    obj_upload_key = "no_obj"
+    if uploaded_objs:
+        parsed_meshes: list[ObjMeshPart] = []
+        material_colors: dict[str, tuple[int, int, int]] = {}
+        upload_fingerprint = hashlib.sha1()
+        for mesh_index, uploaded_obj in enumerate(uploaded_objs):
+            obj_bytes = uploaded_obj.getvalue()
+            upload_fingerprint.update(uploaded_obj.name.encode("utf-8", errors="ignore"))
+            upload_fingerprint.update(str(len(obj_bytes)).encode("ascii"))
+            upload_fingerprint.update(hashlib.sha1(obj_bytes).digest())
+            if Path(uploaded_obj.name).suffix.lower() == ".mtl":
+                material_colors.update(parse_mtl_colors(obj_bytes))
+        obj_files = [
+            uploaded_file
+            for uploaded_file in uploaded_objs
+            if Path(uploaded_file.name).suffix.lower() == ".obj"
+        ]
+        for mesh_index, uploaded_obj in enumerate(obj_files):
+            obj_bytes = uploaded_obj.getvalue()
+            try:
+                parsed_meshes.append(
+                    parse_obj_model(
+                        obj_bytes,
+                        name=uploaded_obj.name,
+                        fallback_color=default_obj_color(uploaded_obj.name, mesh_index),
+                        material_colors=material_colors,
+                    )
+                )
+            except RuntimeError as error:
+                st.error(f"{uploaded_obj.name}: {error}")
+        obj_upload_key = upload_fingerprint.hexdigest()[:12]
+        obj_mesh_count = len(parsed_meshes)
+        if parsed_meshes:
+            combined_obj = combine_obj_meshes(parsed_meshes)
+            obj_vertices = combined_obj.vertices
+            obj_faces = combined_obj.faces
+            obj_face_colors = combined_obj.face_colors
+            obj_normalized_vertices = normalize_obj_vertices(obj_vertices)
+            st.caption(
+                "Loaded 3D parts: "
+                + ", ".join(mesh.name for mesh in parsed_meshes)
+                + ". They are moved/tracked as one complete model."
+            )
+        else:
             obj_overlay_enabled = False
-            obj_vertices = np.empty((0, 3), dtype=np.float32)
         if obj_overlay_enabled:
             with st.expander("3D model placement", expanded=True):
                 use_mouse_obj_placement = st.checkbox("Move/zoom 3D model with mouse", value=True)
@@ -1255,27 +1459,24 @@ try:
                 st.caption(
                     "Manual mode: draw point annotations on the projected OBJ. The nearest OBJ vertices become the 3D anchors."
                 )
-            obj_model_points_3d = normalize_obj_vertices(obj_vertices) @ rotation_matrix_xyz(
+            obj_model_points_3d = obj_normalized_vertices @ rotation_matrix_xyz(
                 obj_rotate_x,
                 obj_rotate_y,
                 obj_rotate_z,
             ).T
             if not use_mouse_obj_placement:
-                obj_projected_points = project_obj_vertices(
-                    obj_vertices,
+                obj_projected_points = project_normalized_obj_vertices(
+                    obj_model_points_3d,
                     frame_width,
                     frame_height,
                     obj_center_x,
                     obj_center_y,
                     obj_scale,
-                    obj_rotate_x,
-                    obj_rotate_y,
-                    obj_rotate_z,
                 )
 
     placement_column = None
     annotation_column = st.container()
-    if obj_overlay_enabled and uploaded_obj is not None and use_mouse_obj_placement:
+    if obj_overlay_enabled and uploaded_objs and use_mouse_obj_placement:
         placement_column, annotation_column = st.columns([1, 1], gap="large")
         with placement_column:
             st.subheader("Place 3D model")
@@ -1292,7 +1493,7 @@ try:
                 drawing_mode="transform",
                 initial_drawing=obj_control_box_drawing(placement_width, placement_height),
                 display_toolbar=False,
-                key=f"obj_placement_{video_path.name}_{frame_index}_{uploaded_obj.name}",
+                key=f"obj_placement_{video_path.name}_{frame_index}_{obj_upload_key}",
             )
             obj_center_x, obj_center_y, obj_scale = obj_placement_from_canvas(
                 placement_result.json_data,
@@ -1301,21 +1502,18 @@ try:
                 frame_height,
             )
             st.caption("Move the blue box to translate the model. Resize it to zoom.")
-            obj_projected_points = project_obj_vertices(
-                obj_vertices,
+            obj_projected_points = project_normalized_obj_vertices(
+                obj_model_points_3d,
                 frame_width,
                 frame_height,
                 obj_center_x,
                 obj_center_y,
                 obj_scale,
-                obj_rotate_x,
-                obj_rotate_y,
-                obj_rotate_z,
             )
 
     canvas_background = frame_rgb
     if obj_overlay_enabled and obj_projected_points is not None:
-        canvas_background = draw_obj_overlay(frame_rgb, obj_projected_points, obj_faces)
+        canvas_background = draw_obj_overlay(frame_rgb, obj_projected_points, obj_faces, obj_face_colors)
 
     display_frame, canvas_scale = resize_for_canvas(canvas_background)
     height, width = display_frame.shape[:2]
@@ -1382,6 +1580,7 @@ try:
                 obj_model_points_3d[obj_anchor_indices],
                 obj_model_points_3d,
                 obj_faces,
+                face_colors=obj_face_colors,
                 transform_mode=obj_transform_mode,
                 frame_size=(frame_width, frame_height),
                 pnp_reprojection_error=obj_pnp_reprojection_error,
@@ -1420,17 +1619,18 @@ try:
         if tracks:
             preview_frame = frame_rgb
             if obj_overlay_enabled and obj_projected_points is not None:
-                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
+                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces, obj_face_colors)
             st.image(draw_tracks(preview_frame, tracks, labels), channels="RGB", use_container_width=True)
             st.caption(
-                f"{manual_point_count} manual point(s), {obj_track_count} 3D model mesh group(s), "
+                f"{manual_point_count} manual point(s), {obj_mesh_count} 3D OBJ part(s), "
+                f"{obj_track_count} 3D model mesh group(s), "
                 f"{grid_point_count} grid point(s), "
                 f"{sum(len(track) for track in tracks)} total tracked item(s)"
             )
         else:
             preview_frame = frame_rgb
             if obj_overlay_enabled and obj_projected_points is not None:
-                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces)
+                preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces, obj_face_colors)
             st.image(preview_frame, channels="RGB", use_container_width=True)
             st.caption("Draw points, rectangles, or polygons above.")
 
