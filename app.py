@@ -198,22 +198,24 @@ def obj_tracks_from_projection(
     frame_width: int,
     frame_height: int,
     max_points: int,
-) -> tuple[list[np.ndarray], list[str]]:
+) -> tuple[list[np.ndarray], list[str], np.ndarray]:
     if max_points <= 0 or len(points_xy) == 0:
-        return [], []
+        return [], [], np.empty(0, dtype=np.int32)
     in_frame = (
         (points_xy[:, 0] >= 0)
         & (points_xy[:, 0] < frame_width)
         & (points_xy[:, 1] >= 0)
         & (points_xy[:, 1] < frame_height)
     )
-    visible_points = points_xy[in_frame].astype(np.float32)
+    visible_indices = np.flatnonzero(in_frame).astype(np.int32)
+    visible_points = points_xy[visible_indices].astype(np.float32)
     if len(visible_points) == 0:
-        return [], []
+        return [], [], np.empty(0, dtype=np.int32)
     if len(visible_points) > max_points:
         indices = np.linspace(0, len(visible_points) - 1, max_points, dtype=np.int32)
         visible_points = visible_points[indices]
-    return [visible_points], ["obj mesh"]
+        visible_indices = visible_indices[indices]
+    return [visible_points], ["obj mesh"], visible_indices
 
 
 def obj_control_box_drawing(width: int, height: int) -> dict[str, Any]:
@@ -1090,6 +1092,8 @@ try:
     obj_overlay_enabled = uploaded_obj is not None
     use_mouse_obj_placement = False
     obj_max_points = 80
+    obj_transform_mode = "PnP"
+    obj_model_points_3d = np.empty((0, 3), dtype=np.float32)
     if uploaded_obj is not None:
         try:
             obj_vertices, obj_faces = parse_obj_model(uploaded_obj.getvalue())
@@ -1125,10 +1129,20 @@ try:
                     obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
                 with rot_c:
                     obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
+                obj_transform_mode = st.selectbox(
+                    "3D overlay transform",
+                    ["PnP", "Similarity"],
+                    help="PnP estimates a 3D pose from tracked anchors. Similarity is the older 2D rigid transform.",
+                )
                 obj_max_points = st.slider("3D model tracking points", 50, 3000, 800, 50)
                 st.caption(
                     "Visible OBJ points are tracked as anchors; the complete OBJ geometry is redrawn from them in the output."
                 )
+            obj_model_points_3d = normalize_obj_vertices(obj_vertices) @ rotation_matrix_xyz(
+                obj_rotate_x,
+                obj_rotate_y,
+                obj_rotate_z,
+            ).T
             if not use_mouse_obj_placement:
                 obj_projected_points = project_obj_vertices(
                     obj_vertices,
@@ -1208,7 +1222,7 @@ try:
     tracks, labels = parse_annotations(canvas_result.json_data, canvas_scale)
     manual_point_count = sum(len(track) for track in tracks)
     if obj_overlay_enabled and obj_projected_points is not None:
-        obj_tracks, obj_labels = obj_tracks_from_projection(
+        obj_tracks, obj_labels, obj_anchor_indices = obj_tracks_from_projection(
             obj_projected_points,
             obj_faces,
             frame_width,
@@ -1221,7 +1235,11 @@ try:
                 obj_labels[0],
                 obj_tracks[0],
                 obj_projected_points,
+                obj_model_points_3d[obj_anchor_indices],
+                obj_model_points_3d,
                 obj_faces,
+                transform_mode=obj_transform_mode,
+                frame_size=(frame_width, frame_height),
             )
         tracks.extend(obj_tracks)
         labels.extend(obj_labels)
