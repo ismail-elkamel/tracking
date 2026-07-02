@@ -181,7 +181,7 @@ def draw_obj_overlay(
     output = frame_rgb.copy()
     if not len(points_xy):
         return output
-    for face in faces[:8000]:
+    for face in faces:
         valid_face = [index for index in face if 0 <= index < len(points_xy)]
         if len(valid_face) < 2:
             continue
@@ -1093,6 +1093,9 @@ try:
     use_mouse_obj_placement = False
     obj_max_points = 80
     obj_transform_mode = "PnP"
+    obj_pnp_reprojection_error = 8.0
+    obj_pnp_min_inliers = 20
+    obj_show_anchor_points = True
     obj_model_points_3d = np.empty((0, 3), dtype=np.float32)
     if uploaded_obj is not None:
         try:
@@ -1134,7 +1137,28 @@ try:
                     ["PnP", "Similarity"],
                     help="PnP estimates a 3D pose from tracked anchors. Similarity is the older 2D rigid transform.",
                 )
+                if obj_transform_mode == "PnP":
+                    pnp_a, pnp_b = st.columns(2)
+                    with pnp_a:
+                        obj_pnp_reprojection_error = st.slider(
+                            "PnP reprojection error px",
+                            2.0,
+                            30.0,
+                            8.0,
+                            0.5,
+                            help="Higher values accept noisier tracked anchors. Lower values reject bad anchors more aggressively.",
+                        )
+                    with pnp_b:
+                        obj_pnp_min_inliers = st.slider(
+                            "PnP min inliers",
+                            6,
+                            200,
+                            20,
+                            1,
+                            help="Minimum good anchors required before accepting the PnP pose.",
+                        )
                 obj_max_points = st.slider("3D model tracking points", 50, 3000, 800, 50)
+                obj_show_anchor_points = st.checkbox("Show 3D anchor points in output", value=True)
                 st.caption(
                     "Visible OBJ points are tracked as anchors; the complete OBJ geometry is redrawn from them in the output."
                 )
@@ -1240,6 +1264,9 @@ try:
                 obj_faces,
                 transform_mode=obj_transform_mode,
                 frame_size=(frame_width, frame_height),
+                pnp_reprojection_error=obj_pnp_reprojection_error,
+                pnp_min_inliers=obj_pnp_min_inliers,
+                show_anchor_points=obj_show_anchor_points,
             )
         tracks.extend(obj_tracks)
         labels.extend(obj_labels)
