@@ -258,6 +258,27 @@ def obj_tracks_from_projection(
     return [visible_points], ["obj mesh"], visible_indices
 
 
+def obj_tracks_from_manual_points(
+    manual_tracks: list[np.ndarray],
+    points_xy: np.ndarray,
+) -> tuple[list[np.ndarray], list[str], np.ndarray]:
+    if len(points_xy) == 0:
+        return [], [], np.empty(0, dtype=np.int32)
+    anchors: list[np.ndarray] = []
+    anchor_indices: list[int] = []
+    for track in manual_tracks:
+        if len(track) != 1:
+            continue
+        point = track[0].astype(np.float32)
+        distances = np.linalg.norm(points_xy - point, axis=1)
+        nearest_index = int(np.argmin(distances))
+        anchors.append(point)
+        anchor_indices.append(nearest_index)
+    if not anchors:
+        return [], [], np.empty(0, dtype=np.int32)
+    return [np.asarray(anchors, dtype=np.float32)], ["obj mesh"], np.asarray(anchor_indices, dtype=np.int32)
+
+
 def obj_control_box_drawing(width: int, height: int) -> dict[str, Any]:
     box_size = max(60, min(width, height) // 3)
     return {
@@ -1133,6 +1154,7 @@ try:
     use_mouse_obj_placement = False
     obj_max_points = 80
     obj_edge_fraction = 0.85
+    obj_anchor_source = "Manual points on model"
     obj_transform_mode = "PnP"
     obj_pnp_reprojection_error = 8.0
     obj_pnp_min_inliers = 20
@@ -1198,18 +1220,24 @@ try:
                             1,
                             help="Minimum good anchors required before accepting the PnP pose.",
                         )
-                obj_max_points = st.slider("3D model tracking points", 20, 3000, 150, 10)
-                obj_edge_fraction = st.slider(
-                    "3D edge anchor ratio",
-                    0.0,
-                    1.0,
-                    0.85,
-                    0.05,
-                    help="Fraction of OBJ tracking anchors forced near the projected model silhouette.",
+                obj_anchor_source = st.selectbox(
+                    "3D anchor source",
+                    ["Manual points on model", "Auto sampled OBJ points"],
+                    help="Manual uses the points you draw as OBJ anchors. Auto samples OBJ vertices for you.",
                 )
+                if obj_anchor_source == "Auto sampled OBJ points":
+                    obj_max_points = st.slider("3D model tracking points", 20, 3000, 150, 10)
+                    obj_edge_fraction = st.slider(
+                        "3D edge anchor ratio",
+                        0.0,
+                        1.0,
+                        0.85,
+                        0.05,
+                        help="Fraction of OBJ tracking anchors forced near the projected model silhouette.",
+                    )
                 obj_show_anchor_points = st.checkbox("Show 3D anchor points in output", value=True)
                 st.caption(
-                    "Visible OBJ points are tracked as anchors; the complete OBJ geometry is redrawn from them in the output."
+                    "Manual mode: draw point annotations on the projected OBJ. The nearest OBJ vertices become the 3D anchors."
                 )
             obj_model_points_3d = normalize_obj_vertices(obj_vertices) @ rotation_matrix_xyz(
                 obj_rotate_x,
@@ -1293,16 +1321,37 @@ try:
         )
 
     tracks, labels = parse_annotations(canvas_result.json_data, canvas_scale)
-    manual_point_count = sum(len(track) for track in tracks)
+    manual_tracks, manual_labels = tracks, labels
+    manual_point_count = sum(len(track) for track in manual_tracks)
+    use_manual_obj_anchors = (
+        obj_overlay_enabled
+        and obj_projected_points is not None
+        and obj_anchor_source == "Manual points on model"
+    )
+    if use_manual_obj_anchors:
+        tracks, labels = [], []
     if obj_overlay_enabled and obj_projected_points is not None:
-        obj_tracks, obj_labels, obj_anchor_indices = obj_tracks_from_projection(
-            obj_projected_points,
-            obj_faces,
-            frame_width,
-            frame_height,
-            obj_max_points,
-            edge_fraction=obj_edge_fraction,
-        )
+        if obj_anchor_source == "Manual points on model":
+            obj_tracks, obj_labels, obj_anchor_indices = obj_tracks_from_manual_points(
+                manual_tracks,
+                obj_projected_points,
+            )
+            if not obj_tracks:
+                st.info("Draw point annotations on the 3D model to create manual OBJ anchors.")
+            elif obj_transform_mode == "PnP" and len(obj_tracks[0]) < max(6, obj_pnp_min_inliers):
+                st.warning(
+                    f"PnP needs at least {max(6, obj_pnp_min_inliers)} accepted manual model points. "
+                    "With fewer points, the app uses the 2D fallback."
+                )
+        else:
+            obj_tracks, obj_labels, obj_anchor_indices = obj_tracks_from_projection(
+                obj_projected_points,
+                obj_faces,
+                frame_width,
+                frame_height,
+                obj_max_points,
+                edge_fraction=obj_edge_fraction,
+            )
         obj_track_count = len(obj_tracks)
         if obj_tracks and obj_labels:
             _tracking_methods.register_obj_overlay(
