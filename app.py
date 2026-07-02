@@ -198,7 +198,7 @@ def obj_tracks_from_projection(
     frame_width: int,
     frame_height: int,
     max_points: int,
-    edge_fraction: float = 0.45,
+    edge_fraction: float = 0.85,
 ) -> tuple[list[np.ndarray], list[str], np.ndarray]:
     if max_points <= 0 or len(points_xy) == 0:
         return [], [], np.empty(0, dtype=np.int32)
@@ -214,37 +214,25 @@ def obj_tracks_from_projection(
         return [], [], np.empty(0, dtype=np.int32)
     if len(visible_points) > max_points:
         selected_local_indices: list[int] = []
-        visible_lookup = {int(vertex_index): local_index for local_index, vertex_index in enumerate(visible_indices)}
         edge_budget = max(6, min(max_points, int(round(max_points * edge_fraction))))
-        if faces and len(visible_points) >= 3:
+        if len(visible_points) >= 3:
             hull = cv2.convexHull(visible_points, returnPoints=False)
             if hull is not None:
-                selected_local_indices.extend(int(index) for index in hull.reshape(-1).tolist())
-
-        if len(selected_local_indices) < edge_budget:
-            candidate_edge_indices: set[int] = set(selected_local_indices)
-            for face in faces:
-                face_local = [visible_lookup[index] for index in face if index in visible_lookup]
-                if len(face_local) < 2:
-                    continue
-                face_points = visible_points[face_local]
-                face_center = face_points.mean(axis=0)
-                distances = np.linalg.norm(face_points - face_center, axis=1)
-                for local_index in np.asarray(face_local)[np.argsort(-distances)[:2]]:
-                    candidate_edge_indices.add(int(local_index))
-            if candidate_edge_indices:
-                ranked = sorted(
-                    candidate_edge_indices,
-                    key=lambda index: float(
-                        min(
-                            visible_points[index, 0],
-                            visible_points[index, 1],
-                            frame_width - 1 - visible_points[index, 0],
-                            frame_height - 1 - visible_points[index, 1],
-                        )
-                    ),
-                )
-                selected_local_indices.extend(ranked[:edge_budget])
+                hull_local_indices = hull.reshape(-1)
+                hull_points = visible_points[hull_local_indices]
+                if len(hull_points) >= 2:
+                    edge_distances = np.full(len(visible_points), np.inf, dtype=np.float32)
+                    for start, end in zip(hull_points, np.roll(hull_points, -1, axis=0)):
+                        segment = end - start
+                        segment_length_sq = float(np.dot(segment, segment))
+                        if segment_length_sq <= 1e-6:
+                            continue
+                        offsets = visible_points - start
+                        t = np.clip((offsets @ segment) / segment_length_sq, 0.0, 1.0)
+                        closest = start + t[:, None] * segment
+                        distances = np.linalg.norm(visible_points - closest, axis=1)
+                        edge_distances = np.minimum(edge_distances, distances)
+                    selected_local_indices.extend(np.argsort(edge_distances)[:edge_budget].astype(int).tolist())
 
         selected_unique: list[int] = []
         seen: set[int] = set()
@@ -1144,6 +1132,7 @@ try:
     obj_overlay_enabled = uploaded_obj is not None
     use_mouse_obj_placement = False
     obj_max_points = 80
+    obj_edge_fraction = 0.85
     obj_transform_mode = "PnP"
     obj_pnp_reprojection_error = 8.0
     obj_pnp_min_inliers = 20
@@ -1209,7 +1198,15 @@ try:
                             1,
                             help="Minimum good anchors required before accepting the PnP pose.",
                         )
-                obj_max_points = st.slider("3D model tracking points", 50, 3000, 800, 50)
+                obj_max_points = st.slider("3D model tracking points", 20, 3000, 150, 10)
+                obj_edge_fraction = st.slider(
+                    "3D edge anchor ratio",
+                    0.0,
+                    1.0,
+                    0.85,
+                    0.05,
+                    help="Fraction of OBJ tracking anchors forced near the projected model silhouette.",
+                )
                 obj_show_anchor_points = st.checkbox("Show 3D anchor points in output", value=True)
                 st.caption(
                     "Visible OBJ points are tracked as anchors; the complete OBJ geometry is redrawn from them in the output."
@@ -1304,6 +1301,7 @@ try:
             frame_width,
             frame_height,
             obj_max_points,
+            edge_fraction=obj_edge_fraction,
         )
         obj_track_count = len(obj_tracks)
         if obj_tracks and obj_labels:
