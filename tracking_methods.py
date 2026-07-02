@@ -53,6 +53,7 @@ class ObjOverlayMetadata:
     anchor_points_3d: np.ndarray
     model_points_3d: np.ndarray
     faces: list[list[int]]
+    edges: list[tuple[int, int]]
     transform_mode: str = "Similarity"
     frame_width: int = 1
     frame_height: int = 1
@@ -63,6 +64,19 @@ class ObjOverlayMetadata:
 
 
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
+
+
+def obj_edges_from_faces(faces: list[list[int]]) -> list[tuple[int, int]]:
+    edges: set[tuple[int, int]] = set()
+    for face in faces:
+        if len(face) < 2:
+            continue
+        for start, end in zip(face, face[1:] + face[:1]):
+            if start == end:
+                continue
+            edge = (start, end) if start < end else (end, start)
+            edges.add(edge)
+    return sorted(edges)
 
 
 def register_obj_overlay(
@@ -85,6 +99,7 @@ def register_obj_overlay(
         anchor_points_3d=anchor_points_3d.astype(np.float32),
         model_points_3d=model_points_3d.astype(np.float32),
         faces=faces,
+        edges=obj_edges_from_faces(faces),
         transform_mode=transform_mode,
         frame_width=int(frame_size[0]),
         frame_height=int(frame_size[1]),
@@ -409,29 +424,26 @@ def draw_obj_mesh(output: np.ndarray, label: str, tracked_points: np.ndarray) ->
         points = apply_obj_transform(metadata.model_points, transform) if metadata is not None else tracked_points
         anchor_points = apply_obj_transform(metadata.anchor_points, transform) if metadata is not None else tracked_points
     faces = metadata.faces if metadata is not None else []
+    edges = metadata.edges if metadata is not None else []
     if len(points) < 3:
         return output
 
     height, width = output.shape[:2]
     render_style = metadata.render_style if metadata is not None else "Wireframe"
     if render_style == "Wireframe":
-        rendered_faces = 0
-        for face in faces:
-            valid_face = [index for index in face if 0 <= index < len(points)]
-            if len(valid_face) < 2:
+        rendered_edges = 0
+        for start, end in edges:
+            if start < 0 or end < 0 or start >= len(points) or end >= len(points):
                 continue
-            polygon = np.round(points[valid_face]).astype(np.int32)
-            in_frame = (
-                (polygon[:, 0] >= 0)
-                & (polygon[:, 0] < width)
-                & (polygon[:, 1] >= 0)
-                & (polygon[:, 1] < height)
-            )
-            if not bool(in_frame.any()):
+            p1 = np.round(points[start]).astype(np.int32)
+            p2 = np.round(points[end]).astype(np.int32)
+            p1_in_frame = 0 <= p1[0] < width and 0 <= p1[1] < height
+            p2_in_frame = 0 <= p2[0] < width and 0 <= p2[1] < height
+            if not (p1_in_frame or p2_in_frame):
                 continue
-            cv2.polylines(output, [polygon], True, (60, 220, 255), 1, lineType=cv2.LINE_AA)
-            rendered_faces += 1
-        if rendered_faces == 0:
+            cv2.line(output, tuple(p1), tuple(p2), (60, 220, 255), 1, lineType=cv2.LINE_AA)
+            rendered_edges += 1
+        if rendered_edges == 0:
             pts = np.round(points).astype(np.int32)
             in_frame = (
                 (pts[:, 0] >= 0)
