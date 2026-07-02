@@ -20,8 +20,6 @@ KIDNEY_LABELS = {
     "kidney parenchyma",
     "kidney fatty island",
     "kidney tumor",
-    "kidney roi",
-    "potential kidney roi",
 }
 
 
