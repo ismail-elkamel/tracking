@@ -448,9 +448,16 @@ PnP uses an approximate camera matrix from the video size when no calibration is
 
 - `PnP reprojection error px`: increase it if good points are rejected because tracking is noisy; decrease it if the model jumps because bad points are accepted.
 - `PnP min inliers`: minimum number of good tracked anchors needed before the app accepts the PnP pose. If this is too high, the app falls back to the 2D similarity transform more often.
+- `3D anchor source`: choose `Manual points on model` to draw the OBJ anchors yourself. Each point you draw is matched to the nearest projected OBJ vertex, then tracked in the video while the full OBJ is reprojected from those fixed 3D correspondences. Choose `Auto sampled OBJ points` only when you want the app to create the OBJ anchors automatically.
 - `3D model tracking points`: number of visible OBJ anchors sent to the tracker. More points make PnP more stable, but also make tracking slower. The default is intentionally low so testing does not start with hundreds of heavy anchors.
 - `3D edge anchor ratio`: fraction of tracking anchors forced near the projected OBJ silhouette. Keep this high, around `0.85`, when you want points on the model border instead of inside the volume.
 - `Show 3D anchor points in output`: keep it enabled when debugging registration; disable it when you only want the 50% opacity OBJ volume in the final video.
+
+Manual anchor behavior:
+
+- `1` point keeps the full OBJ attached by translation.
+- `2-5` points use the 2D similarity fallback.
+- `6+` points can use PnP, but the number must also satisfy `PnP min inliers`.
 
 The preview and final video render all OBJ faces instead of only the first faces, so dense kidney meshes should appear as the full projected model.
 
