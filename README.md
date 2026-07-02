@@ -448,7 +448,7 @@ PnP uses an approximate camera matrix from the video size when no calibration is
 
 - `PnP reprojection error px`: increase it if good points are rejected because tracking is noisy; decrease it if the model jumps because bad points are accepted.
 - `PnP min inliers`: minimum number of good tracked anchors needed before the app accepts the PnP pose. If this is too high, the app falls back to the 2D similarity transform more often.
-- `3D model tracking points`: number of visible OBJ anchors sent to the tracker. More points make PnP more stable, but also make tracking slower.
+- `3D model tracking points`: number of visible OBJ anchors sent to the tracker. More points make PnP more stable, but also make tracking slower. The app reserves part of this budget for projected model-edge anchors, so low values still keep points around the OBJ silhouette instead of only inside the volume.
 - `Show 3D anchor points in output`: keep it enabled when debugging registration; disable it when you only want the 50% opacity OBJ volume in the final video.
 
 The preview and final video render all OBJ faces instead of only the first faces, so dense kidney meshes should appear as the full projected model.
