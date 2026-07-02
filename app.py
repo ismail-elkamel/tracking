@@ -1165,6 +1165,7 @@ try:
     obj_pnp_reprojection_error = 8.0
     obj_pnp_min_inliers = 6
     obj_show_anchor_points = True
+    obj_render_style = "Wireframe"
     obj_model_points_3d = np.empty((0, 3), dtype=np.float32)
     if uploaded_obj is not None:
         try:
@@ -1241,6 +1242,11 @@ try:
                         0.05,
                         help="Fraction of OBJ tracking anchors forced near the projected model silhouette.",
                     )
+                obj_render_style = st.selectbox(
+                    "3D output render style",
+                    ["Wireframe", "50% volume"],
+                    help="Wireframe matches the preview-style cyan mesh. 50% volume fills OBJ faces transparently.",
+                )
                 obj_show_anchor_points = st.checkbox("Show 3D anchor points in output", value=True)
                 st.caption(
                     "Manual mode: draw point annotations on the projected OBJ. The nearest OBJ vertices become the 3D anchors."
@@ -1377,6 +1383,7 @@ try:
                 pnp_reprojection_error=obj_pnp_reprojection_error,
                 pnp_min_inliers=obj_pnp_min_inliers,
                 show_anchor_points=obj_show_anchor_points,
+                render_style=obj_render_style,
             )
         tracks.extend(obj_tracks)
         labels.extend(obj_labels)
