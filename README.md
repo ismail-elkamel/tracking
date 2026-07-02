@@ -441,6 +441,7 @@ After uploading, use the `3D model placement` controls to move, scale, and rotat
 
 Use `3D overlay transform` to choose how the full OBJ follows the tracked anchors:
 
+- `Locked 2D placement`: default mode. It keeps the OBJ exactly as you placed it on the start frame, then moves/rotates/scales that same projected model from the tracked anchors. Use this when you do not want the selected points to redefine the 3D model pose.
 - `PnP`: estimates a 3D pose from OBJ vertex coordinates to tracked 2D anchors, then reprojects the complete OBJ. This is the best first choice for keeping the model coherent during zoom or camera/viewpoint changes.
 - `Similarity`: older 2D fallback using translation, rotation, and scale. Use it if PnP becomes unstable on a difficult clip.
 
