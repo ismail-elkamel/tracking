@@ -1164,7 +1164,7 @@ try:
     obj_transform_mode = "PnP"
     obj_pnp_reprojection_error = 8.0
     obj_pnp_min_inliers = 6
-    obj_show_anchor_points = True
+    obj_show_anchor_points = False
     obj_render_style = "Wireframe"
     obj_model_points_3d = np.empty((0, 3), dtype=np.float32)
     if uploaded_obj is not None:
@@ -1247,7 +1247,7 @@ try:
                     ["Wireframe", "50% volume"],
                     help="Wireframe matches the preview-style cyan mesh. 50% volume fills OBJ faces transparently.",
                 )
-                obj_show_anchor_points = st.checkbox("Show 3D anchor points in output", value=True)
+                obj_show_anchor_points = st.checkbox("Show red 3D anchor points in output", value=False)
                 st.caption(
                     "Manual mode: draw point annotations on the projected OBJ. The nearest OBJ vertices become the 3D anchors."
                 )
