@@ -57,7 +57,7 @@ class ObjOverlayMetadata:
     frame_width: int = 1
     frame_height: int = 1
     pnp_reprojection_error: float = 8.0
-    pnp_min_inliers: int = 20
+    pnp_min_inliers: int = 6
     show_anchor_points: bool = True
 
 
@@ -74,7 +74,7 @@ def register_obj_overlay(
     transform_mode: str = "Similarity",
     frame_size: tuple[int, int] = (1, 1),
     pnp_reprojection_error: float = 8.0,
-    pnp_min_inliers: int = 20,
+    pnp_min_inliers: int = 6,
     show_anchor_points: bool = True,
 ) -> None:
     OBJ_OVERLAYS[label] = ObjOverlayMetadata(
@@ -259,6 +259,23 @@ def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray
     if count == 1:
         dx, dy = (target[0] - source[0]).astype(float)
         return np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
+    if count == 2:
+        source_delta = source[1] - source[0]
+        target_delta = target[1] - target[0]
+        source_length = float(np.linalg.norm(source_delta))
+        target_length = float(np.linalg.norm(target_delta))
+        if source_length <= 1e-6 or target_length <= 1e-6:
+            dx, dy = (target[0] - source[0]).astype(float)
+            return np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
+        scale = target_length / source_length
+        source_angle = float(np.arctan2(source_delta[1], source_delta[0]))
+        target_angle = float(np.arctan2(target_delta[1], target_delta[0]))
+        angle = target_angle - source_angle
+        cos_a = float(np.cos(angle)) * scale
+        sin_a = float(np.sin(angle)) * scale
+        transform = np.array([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0]], dtype=np.float32)
+        transform[:, 2] = target[0] - (transform[:, :2] @ source[0])
+        return transform
     transform, _ = cv2.estimateAffinePartial2D(
         source[:count],
         target[:count],
@@ -306,7 +323,8 @@ def estimate_obj_pnp_pose(
     valid = np.isfinite(image_points).all(axis=1)
     object_points = object_points[valid]
     image_points = image_points[valid]
-    if len(object_points) < 6:
+    required_inliers = max(6, int(metadata.pnp_min_inliers))
+    if len(object_points) < required_inliers:
         return None
 
     camera_matrix = obj_camera_matrix(metadata)
@@ -324,8 +342,7 @@ def estimate_obj_pnp_pose(
     if not success or inliers is None:
         return None
     inliers = inliers.reshape(-1)
-    min_inliers = max(6, min(int(metadata.pnp_min_inliers), len(object_points)))
-    if len(inliers) < min_inliers:
+    if len(inliers) < required_inliers:
         return None
     return rvec, tvec, inliers
 
