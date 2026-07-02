@@ -1161,7 +1161,7 @@ try:
     obj_max_points = 80
     obj_edge_fraction = 0.85
     obj_anchor_source = "Manual points on model"
-    obj_transform_mode = "PnP"
+    obj_transform_mode = "Locked 2D placement"
     obj_pnp_reprojection_error = 8.0
     obj_pnp_min_inliers = 6
     obj_show_anchor_points = False
@@ -1204,8 +1204,11 @@ try:
                     obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
                 obj_transform_mode = st.selectbox(
                     "3D overlay transform",
-                    ["PnP", "Similarity"],
-                    help="PnP estimates a 3D pose from tracked anchors. Similarity is the older 2D rigid transform.",
+                    ["Locked 2D placement", "PnP", "Similarity"],
+                    help=(
+                        "Locked keeps your initial OBJ placement and moves it from tracked anchors. "
+                        "PnP re-estimates a 3D pose from anchors and can change the placement."
+                    ),
                 )
                 if obj_transform_mode == "PnP":
                     pnp_a, pnp_b = st.columns(2)
