@@ -56,6 +56,9 @@ class ObjOverlayMetadata:
     transform_mode: str = "Similarity"
     frame_width: int = 1
     frame_height: int = 1
+    pnp_reprojection_error: float = 8.0
+    pnp_min_inliers: int = 20
+    show_anchor_points: bool = True
 
 
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
@@ -70,6 +73,9 @@ def register_obj_overlay(
     faces: list[list[int]],
     transform_mode: str = "Similarity",
     frame_size: tuple[int, int] = (1, 1),
+    pnp_reprojection_error: float = 8.0,
+    pnp_min_inliers: int = 20,
+    show_anchor_points: bool = True,
 ) -> None:
     OBJ_OVERLAYS[label] = ObjOverlayMetadata(
         anchor_points=anchor_points.astype(np.float32),
@@ -80,6 +86,9 @@ def register_obj_overlay(
         transform_mode=transform_mode,
         frame_width=int(frame_size[0]),
         frame_height=int(frame_size[1]),
+        pnp_reprojection_error=float(pnp_reprojection_error),
+        pnp_min_inliers=int(pnp_min_inliers),
+        show_anchor_points=bool(show_anchor_points),
     )
 
 
@@ -281,71 +290,74 @@ def obj_camera_matrix(metadata: ObjOverlayMetadata) -> np.ndarray:
     )
 
 
-def project_obj_with_pnp(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
-    metadata = OBJ_OVERLAYS.get(label)
-    if metadata is None:
-        return None
+def estimate_obj_pnp_pose(
+    metadata: ObjOverlayMetadata,
+    tracked_points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
     count = min(len(metadata.anchor_points_3d), len(tracked_points))
     if count < 6:
         return None
 
     object_points = metadata.anchor_points_3d[:count].astype(np.float32)
     image_points = tracked_points[:count].astype(np.float32)
+    valid = np.isfinite(image_points).all(axis=1)
+    object_points = object_points[valid]
+    image_points = image_points[valid]
+    if len(object_points) < 6:
+        return None
+
     camera_matrix = obj_camera_matrix(metadata)
     dist_coeffs = np.zeros((4, 1), dtype=np.float32)
-    success, rvec, tvec, _ = cv2.solvePnPRansac(
+    success, rvec, tvec, inliers = cv2.solvePnPRansac(
         object_points,
         image_points,
         camera_matrix,
         dist_coeffs,
-        iterationsCount=100,
-        reprojectionError=8.0,
+        iterationsCount=200,
+        reprojectionError=float(metadata.pnp_reprojection_error),
         confidence=0.99,
         flags=cv2.SOLVEPNP_ITERATIVE,
     )
-    if not success:
+    if not success or inliers is None:
         return None
+    inliers = inliers.reshape(-1)
+    min_inliers = max(6, min(int(metadata.pnp_min_inliers), len(object_points)))
+    if len(inliers) < min_inliers:
+        return None
+    return rvec, tvec, inliers
+
+
+def project_obj_points_with_pnp(
+    metadata: ObjOverlayMetadata,
+    tracked_points: np.ndarray,
+    object_points: np.ndarray,
+) -> np.ndarray | None:
+    pose = estimate_obj_pnp_pose(metadata, tracked_points)
+    if pose is None:
+        return None
+    rvec, tvec, _ = pose
     projected, _ = cv2.projectPoints(
-        metadata.model_points_3d.astype(np.float32),
+        object_points.astype(np.float32),
         rvec,
         tvec,
-        camera_matrix,
-        dist_coeffs,
+        obj_camera_matrix(metadata),
+        np.zeros((4, 1), dtype=np.float32),
     )
     return projected.reshape(-1, 2).astype(np.float32)
+
+
+def project_obj_with_pnp(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
+    metadata = OBJ_OVERLAYS.get(label)
+    if metadata is None:
+        return None
+    return project_obj_points_with_pnp(metadata, tracked_points, metadata.model_points_3d)
 
 
 def project_obj_anchors_with_pnp(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
         return None
-    count = min(len(metadata.anchor_points_3d), len(tracked_points))
-    if count < 6:
-        return None
-    object_points = metadata.anchor_points_3d[:count].astype(np.float32)
-    image_points = tracked_points[:count].astype(np.float32)
-    camera_matrix = obj_camera_matrix(metadata)
-    dist_coeffs = np.zeros((4, 1), dtype=np.float32)
-    success, rvec, tvec, _ = cv2.solvePnPRansac(
-        object_points,
-        image_points,
-        camera_matrix,
-        dist_coeffs,
-        iterationsCount=100,
-        reprojectionError=8.0,
-        confidence=0.99,
-        flags=cv2.SOLVEPNP_ITERATIVE,
-    )
-    if not success:
-        return None
-    projected, _ = cv2.projectPoints(
-        metadata.anchor_points_3d.astype(np.float32),
-        rvec,
-        tvec,
-        camera_matrix,
-        dist_coeffs,
-    )
-    return projected.reshape(-1, 2).astype(np.float32)
+    return project_obj_points_with_pnp(metadata, tracked_points, metadata.anchor_points_3d)
 
 
 def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.ndarray:
@@ -381,7 +393,7 @@ def draw_obj_mesh(output: np.ndarray, label: str, tracked_points: np.ndarray) ->
     overlay = output.copy()
     mask = np.zeros((height, width), dtype=np.uint8)
     rendered_faces = 0
-    for face in faces[:8000]:
+    for face in faces:
         valid_face = [index for index in face if 0 <= index < len(points)]
         if len(valid_face) < 3:
             continue
@@ -416,9 +428,10 @@ def draw_obj_mesh(output: np.ndarray, label: str, tracked_points: np.ndarray) ->
 
     blended = cv2.addWeighted(overlay, 0.5, output, 0.5, 0)
     output[mask > 0] = blended[mask > 0]
-    for point in np.round(anchor_points[:: max(1, len(anchor_points) // 220)]).astype(np.int32):
-        cv2.circle(output, tuple(point), 4, (20, 20, 20), -1, lineType=cv2.LINE_AA)
-        cv2.circle(output, tuple(point), 2, (245, 255, 61), -1, lineType=cv2.LINE_AA)
+    if metadata is None or metadata.show_anchor_points:
+        for point in np.round(anchor_points[:: max(1, len(anchor_points) // 220)]).astype(np.int32):
+            cv2.circle(output, tuple(point), 4, (20, 20, 20), -1, lineType=cv2.LINE_AA)
+            cv2.circle(output, tuple(point), 2, (245, 255, 61), -1, lineType=cv2.LINE_AA)
     return output
 
 
