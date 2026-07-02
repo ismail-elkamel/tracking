@@ -437,7 +437,7 @@ The Streamlit app can load an `.obj` model and project it onto the selected star
 3D model overlay (.obj)
 ```
 
-After uploading, use the `3D model placement` controls to move, scale, and rotate the model. With `Move/zoom 3D model with mouse` enabled, the blue placement box appears next to the point/region annotation canvas: drag the box to translate the model and resize it to zoom. Rotations stay available as sliders. The combined preview is shown below those controls at the same column width. The app tracks projected OBJ anchors, estimates a global transform from them, and redraws the complete OBJ geometry in the final video. By default the output uses a cyan wireframe with red anchor circles, matching the placement preview. Displayed OBJ anchor dots are reprojected from that global model transform, so they stay attached to the 3D model instead of drifting outside it. Regular tracking points stay visible on top, and `Compare models` still works.
+After uploading, use the `3D model placement` controls to move, scale, and rotate the model. With `Move/zoom 3D model with mouse` enabled, the blue placement box appears next to the point/region annotation canvas: drag the box to translate the model and resize it to zoom. Rotations stay available as sliders. The combined preview is shown below those controls at the same column width. The app tracks projected OBJ anchors, estimates a global transform from them, and redraws the complete OBJ geometry in the final video. By default the output uses a cyan wireframe with each OBJ edge drawn once. Red anchor circles are hidden by default. Regular tracking points stay visible on top, and `Compare models` still works.
 
 Use `3D overlay transform` to choose how the full OBJ follows the tracked anchors:
 
@@ -451,8 +451,8 @@ PnP uses an approximate camera matrix from the video size when no calibration is
 - `3D anchor source`: choose `Manual points on model` to draw the OBJ anchors yourself. Each point you draw is matched to the nearest projected OBJ vertex, then tracked in the video while the full OBJ is reprojected from those fixed 3D correspondences. Points clicked too far from the projected OBJ are ignored. Choose `Auto sampled OBJ points` only when you want the app to create the OBJ anchors automatically.
 - `3D model tracking points`: number of visible OBJ anchors sent to the tracker. More points make PnP more stable, but also make tracking slower. The default is intentionally low so testing does not start with hundreds of heavy anchors.
 - `3D edge anchor ratio`: fraction of tracking anchors forced near the projected OBJ silhouette. Keep this high, around `0.85`, when you want points on the model border instead of inside the volume.
-- `3D output render style`: `Wireframe` draws the full OBJ as cyan edges and red anchor circles in the final video. `50% volume` fills OBJ faces transparently.
-- `Show 3D anchor points in output`: keep it enabled when debugging registration; disable it when you only want the OBJ model without red anchor circles in the final video.
+- `3D output render style`: `Wireframe` draws the full OBJ as cyan edges in the final video. `50% volume` fills OBJ faces transparently.
+- `Show red 3D anchor points in output`: keep it disabled for a clean result video; enable it only when debugging registration.
 
 Manual anchor behavior:
 
