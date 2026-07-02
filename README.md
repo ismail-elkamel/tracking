@@ -512,13 +512,15 @@ When a 3D OBJ overlay is active, the same instrument mask is also used as an occ
 
 ## 3D Model Overlay During Tracking
 
-The Streamlit app can load an `.obj` model and project it onto the selected start frame. Use the sidebar upload:
+The Streamlit app can load one or several `.obj` models and project them onto the selected start frame. If your OBJ export uses material files, upload the matching `.mtl` files in the same control so colors can be read from them. Use the sidebar upload:
 
 ```text
-3D model overlay (.obj)
+3D model overlays (.obj, optional .mtl)
 ```
 
-After uploading, use the `3D model placement` controls to move, scale, and rotate the model. With `Move/zoom 3D model with mouse` enabled, the blue placement box appears next to the point/region annotation canvas: drag the box to translate the model and resize it to zoom. Rotations stay available as sliders. The combined preview is shown below those controls at the same column width. The app tracks projected OBJ anchors, estimates a global transform from them, and redraws the complete OBJ geometry in the final video. By default the output uses a cyan wireframe with each OBJ edge drawn once. Red anchor circles are hidden by default. Regular tracking points stay visible on top, and `Compare models` still works.
+When several OBJ files are uploaded, they are treated as one complete 3D scene. This is useful for kidney + cortex + artery + vein + tumor exports: the app keeps the relative 3D positions from the files, places the full group with one control box, tracks anchors on any visible part, and redraws every uploaded OBJ in the final video. Vertex colors embedded in the OBJ are kept. Material colors from uploaded `.mtl` files are also kept. If no vertex/material colors are present, the app uses stable fallback colors from the file/material names, for example artery/aorta red, vein blue, tumor pink, cortex orange, and kidney cyan.
+
+After uploading, use the `3D model placement` controls to move, scale, and rotate the complete model. With `Move/zoom 3D model with mouse` enabled, the blue placement box appears next to the point/region annotation canvas: drag the box to translate the model and resize it to zoom. Rotations stay available as sliders. The combined preview is shown below those controls at the same column width. The app tracks projected OBJ anchors, estimates a global transform from them, and redraws the complete OBJ geometry in the final video. Red anchor circles are hidden by default. Regular tracking points stay visible on top, and `Compare models` still works.
 
 Use `3D overlay transform` to choose how the full OBJ follows the tracked anchors:
 
@@ -533,7 +535,7 @@ PnP uses an approximate camera matrix from the video size when no calibration is
 - `3D anchor source`: choose `Manual points on model` to draw the OBJ anchors yourself. Each point you draw is matched to the nearest projected OBJ vertex, then tracked in the video while the full OBJ is reprojected from those fixed 3D correspondences. Points clicked too far from the projected OBJ are ignored. Choose `Auto sampled OBJ points` only when you want the app to create the OBJ anchors automatically.
 - `3D model tracking points`: number of visible OBJ anchors sent to the tracker. More points make PnP more stable, but also make tracking slower. The default is intentionally low so testing does not start with hundreds of heavy anchors.
 - `3D edge anchor ratio`: fraction of tracking anchors forced near the projected OBJ silhouette. Keep this high, around `0.85`, when you want points on the model border instead of inside the volume.
-- `3D output render style`: `Wireframe` draws the full OBJ as cyan edges in the final video. `50% volume` fills OBJ faces transparently.
+- `3D output render style`: `Wireframe` draws the full OBJ scene with each part's color in the final video. `50% volume` fills OBJ faces transparently with the same colors.
 - `Show red 3D anchor points in output`: keep it disabled for a clean result video; enable it only when debugging registration.
 
 Manual anchor behavior:
@@ -542,7 +544,7 @@ Manual anchor behavior:
 - `2-5` points use the 2D similarity fallback.
 - `6+` points can use PnP, but the number must also satisfy `PnP min inliers`.
 
-The preview and final video render all OBJ faces instead of only the first faces, so dense kidney meshes should appear as the full projected model.
+The preview and final video render all OBJ faces instead of only the first faces, so dense kidney meshes should appear as the full projected model. For multi-OBJ exports, upload files from the same 3D scene/export so their coordinates already match each other before the app applies the shared placement transform.
 
 Current behavior is a lightweight 2D orthographic projection for interactive testing. It is useful for quickly checking whether point tracking can keep a coarse model overlay aligned, but it is not yet a camera-calibrated 3D registration pipeline.
 
