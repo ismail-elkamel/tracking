@@ -399,6 +399,79 @@ python -m instrument_segmentation.infer_video \
   --save-mask-video instrument_segmentation/runs/video1_instrument_mask.mp4
 ```
 
+## Kidney Segmentation Training
+
+The folder `kidney_segmentation/` trains a binary model with one positive class:
+
+```text
+kidney
+```
+
+The mask is the union of these annotation labels:
+
+```text
+Kidney parenchyma
+Kidney fatty island
+Kidney tumor
+Kidney ROI
+Potential Kidney ROI
+```
+
+So tumor, fatty island, and parenchyma are not separated during training; they are all positive kidney pixels.
+
+Train and export the default kidney model:
+
+```bash
+conda activate track_env
+python -m kidney_segmentation.train \
+  --data-root "data/Instrument segmentation" \
+  --output-dir kidney_segmentation/runs/kidney_model \
+  --model deeplabv3plus_efficientnet_b4 \
+  --loss tversky_focal \
+  --optimizer adamw \
+  --epochs 50 \
+  --batch-size 4 \
+  --image-size 512 \
+  --visdom \
+  --visdom-env kidney_segmentation \
+  --visdom-images-env kidney_segmentation_images \
+  --visdom-test-images 4 \
+  --visdom-hard-images 4 \
+  --export-onnx
+```
+
+Preview a trained checkpoint on one image:
+
+```bash
+python -m kidney_segmentation.predict \
+  --checkpoint kidney_segmentation/runs/kidney_model/best.pt \
+  --image "data/Instrument segmentation/UT1/img/YOUR_IMAGE.png" \
+  --output kidney_segmentation/runs/preview.png
+```
+
+Test the ONNX kidney model on images:
+
+```bash
+python -m kidney_segmentation.test_onnx \
+  --onnx kidney_segmentation/runs/kidney_model/best.onnx \
+  --input "data/Instrument segmentation/UT1/img" \
+  --output-dir kidney_segmentation/runs/onnx_predictions \
+  --image-size 512 \
+  --threshold 0.5
+```
+
+Run ONNX kidney segmentation on a video:
+
+```bash
+python -m kidney_segmentation.infer_video \
+  --onnx kidney_segmentation/runs/kidney_model/best.onnx \
+  --video data/input/video1.mp4 \
+  --output kidney_segmentation/runs/video1_kidney_overlay.mp4 \
+  --save-mask-video kidney_segmentation/runs/video1_kidney_mask.mp4 \
+  --image-size 512 \
+  --threshold 0.5
+```
+
 ## Instrument Avoidance During Tracking
 
 The Streamlit tracker can use the trained instrument ONNX model to avoid tracking points on surgical tools. This applies to the built-in local trackers: OpenCV Lucas-Kanade, CoTracker3, and LiteTracker.
