@@ -22,6 +22,7 @@ data/
 # Models / weights / large files
 models/
 instrument_segmentation/runs/
+kidney_segmentation/runs/
 external/**/checkpoints/
 external/**/*.ckpt
 external/**/*.safetensors
