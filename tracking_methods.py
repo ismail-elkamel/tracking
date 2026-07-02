@@ -53,7 +53,9 @@ class ObjOverlayMetadata:
     anchor_points_3d: np.ndarray
     model_points_3d: np.ndarray
     faces: list[list[int]]
+    face_colors: list[tuple[int, int, int]]
     edges: list[tuple[int, int]]
+    edge_colors: list[tuple[int, int, int]]
     transform_mode: str = "Similarity"
     frame_width: int = 1
     frame_height: int = 1
@@ -66,17 +68,26 @@ class ObjOverlayMetadata:
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
 
 
-def obj_edges_from_faces(faces: list[list[int]]) -> list[tuple[int, int]]:
-    edges: set[tuple[int, int]] = set()
-    for face in faces:
+def obj_edges_from_faces(
+    faces: list[list[int]],
+    face_colors: list[tuple[int, int, int]] | None = None,
+) -> tuple[list[tuple[int, int]], list[tuple[int, int, int]]]:
+    edge_colors_by_key: dict[tuple[int, int], tuple[int, int, int]] = {}
+    default_color = (60, 220, 255)
+    for face_index, face in enumerate(faces):
         if len(face) < 2:
             continue
+        face_color = default_color
+        if face_colors is not None and face_index < len(face_colors):
+            face_color = face_colors[face_index]
         for start, end in zip(face, face[1:] + face[:1]):
             if start == end:
                 continue
             edge = (start, end) if start < end else (end, start)
-            edges.add(edge)
-    return sorted(edges)
+            edge_colors_by_key.setdefault(edge, face_color)
+    edges = sorted(edge_colors_by_key)
+    edge_colors = [edge_colors_by_key[edge] for edge in edges]
+    return edges, edge_colors
 
 
 def register_obj_overlay(
@@ -86,6 +97,7 @@ def register_obj_overlay(
     anchor_points_3d: np.ndarray,
     model_points_3d: np.ndarray,
     faces: list[list[int]],
+    face_colors: list[tuple[int, int, int]] | None = None,
     transform_mode: str = "Similarity",
     frame_size: tuple[int, int] = (1, 1),
     pnp_reprojection_error: float = 8.0,
@@ -93,13 +105,18 @@ def register_obj_overlay(
     show_anchor_points: bool = True,
     render_style: str = "Wireframe",
 ) -> None:
+    if face_colors is None:
+        face_colors = [(60, 220, 255)] * len(faces)
+    edges, edge_colors = obj_edges_from_faces(faces, face_colors)
     OBJ_OVERLAYS[label] = ObjOverlayMetadata(
         anchor_points=anchor_points.astype(np.float32),
         model_points=model_points.astype(np.float32),
         anchor_points_3d=anchor_points_3d.astype(np.float32),
         model_points_3d=model_points_3d.astype(np.float32),
         faces=faces,
-        edges=obj_edges_from_faces(faces),
+        face_colors=face_colors,
+        edges=edges,
+        edge_colors=edge_colors,
         transform_mode=transform_mode,
         frame_width=int(frame_size[0]),
         frame_height=int(frame_size[1]),
@@ -449,6 +466,8 @@ def draw_obj_mesh(
         anchor_points = apply_obj_transform(metadata.anchor_points, transform) if metadata is not None else tracked_points
     faces = metadata.faces if metadata is not None else []
     edges = metadata.edges if metadata is not None else []
+    face_colors = metadata.face_colors if metadata is not None else []
+    edge_colors = metadata.edge_colors if metadata is not None else []
     if len(points) < 3:
         return output
 
@@ -456,7 +475,7 @@ def draw_obj_mesh(
     render_style = metadata.render_style if metadata is not None else "Wireframe"
     if render_style == "Wireframe":
         rendered_edges = 0
-        for start, end in edges:
+        for edge_index, (start, end) in enumerate(edges):
             if start < 0 or end < 0 or start >= len(points) or end >= len(points):
                 continue
             p1 = np.round(points[start]).astype(np.int32)
@@ -465,7 +484,8 @@ def draw_obj_mesh(
             p2_in_frame = 0 <= p2[0] < width and 0 <= p2[1] < height
             if not (p1_in_frame or p2_in_frame):
                 continue
-            cv2.line(output, tuple(p1), tuple(p2), (60, 220, 255), 1, lineType=cv2.LINE_AA)
+            edge_color = edge_colors[edge_index] if edge_index < len(edge_colors) else (60, 220, 255)
+            cv2.line(output, tuple(p1), tuple(p2), edge_color, 1, lineType=cv2.LINE_AA)
             rendered_edges += 1
         if rendered_edges == 0:
             pts = np.round(points).astype(np.int32)
@@ -486,7 +506,7 @@ def draw_obj_mesh(
     overlay = output.copy()
     mask = np.zeros((height, width), dtype=np.uint8)
     rendered_faces = 0
-    for face in faces:
+    for face_index, face in enumerate(faces):
         valid_face = [index for index in face if 0 <= index < len(points)]
         if len(valid_face) < 3:
             continue
@@ -499,9 +519,10 @@ def draw_obj_mesh(
         )
         if not bool(in_frame.any()):
             continue
-        cv2.fillPoly(overlay, [polygon], (60, 220, 255), lineType=cv2.LINE_AA)
+        face_color = face_colors[face_index] if face_index < len(face_colors) else (60, 220, 255)
+        cv2.fillPoly(overlay, [polygon], face_color, lineType=cv2.LINE_AA)
         cv2.fillPoly(mask, [polygon], 255, lineType=cv2.LINE_AA)
-        cv2.polylines(overlay, [polygon], True, (60, 220, 255), 1, lineType=cv2.LINE_AA)
+        cv2.polylines(overlay, [polygon], True, face_color, 1, lineType=cv2.LINE_AA)
         rendered_faces += 1
 
     if rendered_faces == 0:
