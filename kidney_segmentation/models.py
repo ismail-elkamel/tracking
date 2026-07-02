@@ -13,13 +13,19 @@ class TorchvisionSegmentationWrapper(nn.Module):
         return self.model(x)["out"]
 
 
-DEFAULT_MODEL = "deeplabv3plus_efficientnet_b4"
+DEFAULT_MODEL = "segformer_mit_b4"
 
 
 def build_model(model_name: str = DEFAULT_MODEL) -> nn.Module:
     model_name = model_name.lower()
 
-    if model_name in {"unet_efficientnet_b4", "deeplabv3plus_efficientnet_b4", "unetplusplus_efficientnet_b4"}:
+    if model_name in {
+        "segformer_mit_b4",
+        "segformer_mit_b5",
+        "unet_efficientnet_b4",
+        "deeplabv3plus_efficientnet_b4",
+        "unetplusplus_efficientnet_b4",
+    }:
         try:
             import segmentation_models_pytorch as smp
         except ImportError as error:
@@ -28,6 +34,20 @@ def build_model(model_name: str = DEFAULT_MODEL) -> nn.Module:
                 "`python -m pip install segmentation-models-pytorch`."
             ) from error
 
+        if model_name == "segformer_mit_b4":
+            return smp.Segformer(
+                encoder_name="mit_b4",
+                encoder_weights="imagenet",
+                in_channels=3,
+                classes=1,
+            )
+        if model_name == "segformer_mit_b5":
+            return smp.Segformer(
+                encoder_name="mit_b5",
+                encoder_weights="imagenet",
+                in_channels=3,
+                classes=1,
+            )
         if model_name == "unet_efficientnet_b4":
             return smp.Unet(
                 encoder_name="efficientnet-b4",
@@ -57,7 +77,7 @@ def build_model(model_name: str = DEFAULT_MODEL) -> nn.Module:
         return TorchvisionSegmentationWrapper(model)
 
     raise ValueError(
-        "Unknown model. Use one of: unet_efficientnet_b4, "
-        "unetplusplus_efficientnet_b4, deeplabv3plus_efficientnet_b4, "
-        "torchvision_deeplabv3_resnet50."
+        "Unknown model. Use one of: segformer_mit_b4, segformer_mit_b5, "
+        "unet_efficientnet_b4, unetplusplus_efficientnet_b4, "
+        "deeplabv3plus_efficientnet_b4, torchvision_deeplabv3_resnet50."
     )
