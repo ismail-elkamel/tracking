@@ -426,7 +426,7 @@ conda activate track_env
 python -m kidney_segmentation.train \
   --data-root "data/Instrument segmentation" \
   --output-dir kidney_segmentation/runs/kidney_model \
-  --model deeplabv3plus_efficientnet_b4 \
+  --model segformer_mit_b4 \
   --loss tversky_focal \
   --optimizer adamw \
   --epochs 50 \
@@ -438,6 +438,12 @@ python -m kidney_segmentation.train \
   --visdom-test-images 4 \
   --visdom-hard-images 4 \
   --export-onnx
+```
+
+The kidney default is `segformer_mit_b4`: SegFormer with a pretrained MiT-B4 encoder. It is usually stronger for surgical frames than the older DeepLabV3+ EfficientNet default because the transformer encoder captures wider context around organ boundaries, smoke, reflections, and partial visibility. If GPU memory allows it, you can try the larger model:
+
+```bash
+--model segformer_mit_b5
 ```
 
 Preview a trained checkpoint on one image:
