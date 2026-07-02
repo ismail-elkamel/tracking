@@ -998,7 +998,8 @@ with st.sidebar:
             dilation=instrument_dilation,
         )
         st.caption(
-            "Applies to OpenCV, CoTracker, and LiteTracker. Points on the instrument mask are hidden and resume when they leave it."
+            "Applies to OpenCV, CoTracker, and LiteTracker. Points on the instrument mask are hidden, "
+            "and the 3D overlay is occluded so instruments stay above the organ."
         )
     show_live_preview = st.checkbox("Live preview while tracking/collage", value=False)
     st.caption("Uploads and outputs are temporary. Use the download buttons to keep results.")
