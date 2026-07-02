@@ -429,6 +429,8 @@ Controls:
 
 When a tracked point lands on the instrument mask, the app hides it and keeps its last valid non-instrument position internally. The point can appear again when the tracker predicts it outside the instrument mask.
 
+When a 3D OBJ overlay is active, the same instrument mask is also used as an occlusion layer: OBJ pixels are not drawn on instrument pixels, so instruments remain visually above the organ/model in the result video.
+
 ## 3D Model Overlay During Tracking
 
 The Streamlit app can load an `.obj` model and project it onto the selected start frame. Use the sidebar upload:
