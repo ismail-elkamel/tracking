@@ -224,14 +224,14 @@ def write_prompt_file(
     return path
 
 
-def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.ndarray:
+def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
-        return tracked_points
+        return None
     source = metadata.anchor_points
     target = tracked_points.astype(np.float32)
     if len(source) < 2 or len(target) < 2:
-        return metadata.model_points
+        return None
     count = min(len(source), len(target))
     transform, _ = cv2.estimateAffinePartial2D(
         source[:count],
@@ -244,16 +244,30 @@ def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.nda
             np.float32([source[0], source[count // 2], source[count - 1]]),
             np.float32([target[0], target[count // 2], target[count - 1]]),
         ) if count >= 3 else None
+    return transform
+
+
+def apply_obj_transform(points: np.ndarray, transform: np.ndarray | None) -> np.ndarray:
     if transform is None:
-        return metadata.model_points
-    ones = np.ones((len(metadata.model_points), 1), dtype=np.float32)
-    homogeneous = np.hstack([metadata.model_points.astype(np.float32), ones])
+        return points.astype(np.float32)
+    ones = np.ones((len(points), 1), dtype=np.float32)
+    homogeneous = np.hstack([points.astype(np.float32), ones])
     return (homogeneous @ transform.T).astype(np.float32)
+
+
+def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.ndarray:
+    metadata = OBJ_OVERLAYS.get(label)
+    if metadata is None:
+        return tracked_points
+    transform = estimate_obj_transform(label, tracked_points)
+    return apply_obj_transform(metadata.model_points, transform)
 
 
 def draw_obj_mesh(output: np.ndarray, label: str, tracked_points: np.ndarray) -> np.ndarray:
     metadata = OBJ_OVERLAYS.get(label)
-    points = transform_obj_model_points(label, tracked_points)
+    transform = estimate_obj_transform(label, tracked_points)
+    points = apply_obj_transform(metadata.model_points, transform) if metadata is not None else tracked_points
+    anchor_points = apply_obj_transform(metadata.anchor_points, transform) if metadata is not None else tracked_points
     faces = metadata.faces if metadata is not None else []
     if len(points) < 3:
         return output
@@ -297,7 +311,7 @@ def draw_obj_mesh(output: np.ndarray, label: str, tracked_points: np.ndarray) ->
 
     blended = cv2.addWeighted(overlay, 0.5, output, 0.5, 0)
     output[mask > 0] = blended[mask > 0]
-    for point in np.round(tracked_points[:: max(1, len(tracked_points) // 220)]).astype(np.int32):
+    for point in np.round(anchor_points[:: max(1, len(anchor_points) // 220)]).astype(np.int32):
         cv2.circle(output, tuple(point), 4, (20, 20, 20), -1, lineType=cv2.LINE_AA)
         cv2.circle(output, tuple(point), 2, (245, 255, 61), -1, lineType=cv2.LINE_AA)
     return output
