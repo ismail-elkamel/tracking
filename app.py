@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import base64
 import csv
 import hashlib
-import io
 import importlib
 import math
 import shutil
@@ -352,190 +350,6 @@ def draw_obj_overlay(
     return output
 
 
-def obj_edges_from_faces(faces: list[list[int]]) -> list[tuple[int, int]]:
-    edges: set[tuple[int, int]] = set()
-    for face in faces:
-        if len(face) < 2:
-            continue
-        for start, end in zip(face, face[1:] + face[:1]):
-            if start == end:
-                continue
-            edges.add((start, end) if start < end else (end, start))
-    return sorted(edges)
-
-
-def obj_control_image(
-    points_xy: np.ndarray,
-    faces: list[list[int]],
-    face_colors: list[tuple[int, int, int]] | None,
-    canvas_width: int,
-    canvas_height: int,
-    padding: int = 12,
-) -> tuple[str, tuple[float, float], tuple[int, int]] | None:
-    if len(points_xy) == 0:
-        return None
-
-    finite = np.isfinite(points_xy).all(axis=1)
-    if not bool(finite.any()):
-        return None
-    valid_points = points_xy[finite]
-    min_xy = np.floor(valid_points.min(axis=0) - padding).astype(int)
-    max_xy = np.ceil(valid_points.max(axis=0) + padding).astype(int)
-    min_xy = np.maximum(min_xy, [-canvas_width, -canvas_height])
-    max_xy = np.minimum(max_xy, [canvas_width * 2, canvas_height * 2])
-    image_width = int(max(8, max_xy[0] - min_xy[0]))
-    image_height = int(max(8, max_xy[1] - min_xy[1]))
-
-    rgba = np.zeros((image_height, image_width, 4), dtype=np.uint8)
-    shifted_points = points_xy - min_xy.astype(np.float32)
-    edges = obj_edges_from_faces(faces)
-    if edges:
-        edge_colors = [(60, 220, 255)] * len(edges)
-        if face_colors:
-            color_by_edge: dict[tuple[int, int], tuple[int, int, int]] = {}
-            for face_index, face in enumerate(faces):
-                face_color = face_colors[face_index] if face_index < len(face_colors) else (60, 220, 255)
-                for start, end in zip(face, face[1:] + face[:1]):
-                    if start == end:
-                        continue
-                    edge = (start, end) if start < end else (end, start)
-                    color_by_edge.setdefault(edge, face_color)
-            edge_colors = [color_by_edge.get(edge, (60, 220, 255)) for edge in edges]
-
-        max_edges = 2500
-        if len(edges) > max_edges:
-            selected = np.linspace(0, len(edges) - 1, max_edges, dtype=np.int32)
-            edges = [edges[int(index)] for index in selected]
-            edge_colors = [edge_colors[int(index)] for index in selected]
-
-        for edge_index, (start, end) in enumerate(edges):
-            if start < 0 or end < 0 or start >= len(shifted_points) or end >= len(shifted_points):
-                continue
-            p1 = np.round(shifted_points[start]).astype(np.int32)
-            p2 = np.round(shifted_points[end]).astype(np.int32)
-            color = edge_colors[edge_index] if edge_index < len(edge_colors) else (60, 220, 255)
-            cv2.line(rgba, tuple(p1), tuple(p2), (*color, 230), 1, lineType=cv2.LINE_AA)
-    else:
-        pts = np.round(shifted_points).astype(np.int32)
-        for point in pts[:: max(1, len(pts) // 1200)]:
-            cv2.circle(rgba, tuple(point), 1, (60, 220, 255, 230), -1, lineType=cv2.LINE_AA)
-
-    alpha = rgba[:, :, 3]
-    if int(alpha.max()) == 0:
-        return None
-    png = Image.fromarray(rgba, mode="RGBA")
-    buffer = io.BytesIO()
-    png.save(buffer, format="PNG")
-    data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
-    return data_url, (float(min_xy[0]), float(min_xy[1])), (image_width, image_height)
-
-
-def obj_control_model_drawing(
-    width: int,
-    height: int,
-    points_xy: np.ndarray,
-    faces: list[list[int]],
-    face_colors: list[tuple[int, int, int]] | None = None,
-    max_segments: int = 1200,
-) -> dict[str, Any]:
-    if len(points_xy) == 0:
-        return obj_control_box_drawing(width, height)
-
-    image_payload = obj_control_image(points_xy, faces, face_colors, width, height)
-    if image_payload is not None:
-        image_src, (left, top), (image_width, image_height) = image_payload
-        return {
-            "version": "4.4.0",
-            "objects": [
-                {
-                    "type": "image",
-                    "version": "4.4.0",
-                    "originX": "left",
-                    "originY": "top",
-                    "left": left,
-                    "top": top,
-                    "width": image_width,
-                    "height": image_height,
-                    "scaleX": 1,
-                    "scaleY": 1,
-                    "src": image_src,
-                    "crossOrigin": "anonymous",
-                    "opacity": 1.0,
-                    "selectable": True,
-                    "evented": True,
-                    "transparentCorners": False,
-                    "cornerColor": "#ffff42",
-                    "cornerStrokeColor": "#111111",
-                    "borderColor": "#ffff42",
-                    "lockRotation": True,
-                    "lockScalingFlip": True,
-                    "lockUniScaling": True,
-                    "hasRotatingPoint": False,
-                    "objectCaching": False,
-                }
-            ],
-        }
-
-    edges = obj_edges_from_faces(faces)
-    if len(edges) > max_segments:
-        sample_indices = np.linspace(0, len(edges) - 1, max_segments, dtype=np.int32)
-        edges = [edges[int(index)] for index in sample_indices]
-
-    path: list[list[float | str]] = []
-    for start, end in edges:
-        if start < 0 or end < 0 or start >= len(points_xy) or end >= len(points_xy):
-            continue
-        p1 = points_xy[start]
-        p2 = points_xy[end]
-        p1_visible = -width <= p1[0] <= width * 2 and -height <= p1[1] <= height * 2
-        p2_visible = -width <= p2[0] <= width * 2 and -height <= p2[1] <= height * 2
-        if not (p1_visible or p2_visible):
-            continue
-        path.append(["M", float(p1[0]), float(p1[1])])
-        path.append(["L", float(p2[0]), float(p2[1])])
-
-    if not path:
-        pts = np.round(points_xy).astype(np.float32)
-        in_canvas = (
-            (pts[:, 0] >= 0)
-            & (pts[:, 0] < width)
-            & (pts[:, 1] >= 0)
-            & (pts[:, 1] < height)
-        )
-        pts = pts[in_canvas]
-        if len(pts) >= 3:
-            hull = cv2.convexHull(pts).reshape(-1, 2)
-            path = [["M", float(hull[0, 0]), float(hull[0, 1])]]
-            path.extend(["L", float(point[0]), float(point[1])] for point in hull[1:])
-            path.append(["L", float(hull[0, 0]), float(hull[0, 1])])
-        else:
-            return obj_control_box_drawing(width, height)
-
-    return {
-        "version": "4.4.0",
-        "objects": [
-            {
-                "type": "path",
-                "path": path,
-                "fill": "",
-                "stroke": "#3cdcff",
-                "strokeWidth": 2,
-                "strokeLineCap": "round",
-                "strokeLineJoin": "round",
-                "transparentCorners": False,
-                "cornerColor": "#ffff42",
-                "cornerStrokeColor": "#111111",
-                "borderColor": "#ffff42",
-                "lockRotation": True,
-                "lockScalingFlip": True,
-                "lockUniScaling": True,
-                "hasRotatingPoint": False,
-                "objectCaching": False,
-            }
-        ],
-    }
-
-
 def obj_tracks_from_projection(
     points_xy: np.ndarray,
     faces: list[list[int]],
@@ -657,42 +471,21 @@ def obj_placement_from_canvas(
     canvas_scale: float,
     frame_width: int,
     frame_height: int,
-    model_extent: float | None = None,
-    base_scale_px: float | None = None,
 ) -> tuple[float, float, float]:
     default_scale = max(40.0, min(frame_width, frame_height) / 4.0)
     if not json_data:
         return frame_width / 2.0, frame_height / 2.0, default_scale
     for obj in json_data.get("objects", []):
-        obj_type = obj.get("type")
-        if obj_type in {"rect", "image"}:
-            left = float(obj.get("left", 0.0))
-            top = float(obj.get("top", 0.0))
-            scale_x = float(obj.get("scaleX", 1.0))
-            scale_y = float(obj.get("scaleY", 1.0))
-            width = float(obj.get("width", 0.0)) * scale_x
-            height = float(obj.get("height", 0.0)) * scale_y
-            center_x = (left + width / 2.0) / canvas_scale
-            center_y = (top + height / 2.0) / canvas_scale
-            if obj_type == "image":
-                scale_px = float(base_scale_px or default_scale) * max(scale_x, scale_y)
-                scale_px = max(10.0, scale_px)
-            else:
-                scale_px = max(10.0, max(width, height) / (2.0 * canvas_scale))
-            return center_x, center_y, scale_px
-        if obj_type in {"path", "polygon"}:
-            points = fabric_points(obj)
-            if len(points) < 2:
-                continue
-            point_array = np.asarray(points, dtype=np.float32)
-            min_xy = point_array.min(axis=0)
-            max_xy = point_array.max(axis=0)
-            size_xy = np.maximum(max_xy - min_xy, 1.0)
-            extent = float(model_extent or 2.0)
-            center_x = float((min_xy[0] + max_xy[0]) / (2.0 * canvas_scale))
-            center_y = float((min_xy[1] + max_xy[1]) / (2.0 * canvas_scale))
-            scale_px = max(10.0, float(size_xy.max()) / (canvas_scale * max(extent, 1e-6)))
-            return center_x, center_y, scale_px
+        if obj.get("type") != "rect":
+            continue
+        left = float(obj.get("left", 0.0))
+        top = float(obj.get("top", 0.0))
+        width = float(obj.get("width", 0.0)) * float(obj.get("scaleX", 1.0))
+        height = float(obj.get("height", 0.0)) * float(obj.get("scaleY", 1.0))
+        center_x = (left + width / 2.0) / canvas_scale
+        center_y = (top + height / 2.0) / canvas_scale
+        scale_px = max(10.0, max(width, height) / (2.0 * canvas_scale))
+        return center_x, center_y, scale_px
     return frame_width / 2.0, frame_height / 2.0, default_scale
 
 
@@ -1561,7 +1354,29 @@ try:
             for uploaded_file in uploaded_objs
             if Path(uploaded_file.name).suffix.lower() == ".obj"
         ]
-        for mesh_index, uploaded_obj in enumerate(obj_files):
+        obj_upload_seed = upload_fingerprint.hexdigest()[:12]
+        selected_obj_files = obj_files
+        if len(obj_files) > 1:
+            selected_obj_files = []
+            with st.expander("3D OBJ parts", expanded=True):
+                st.caption("Choose which OBJ parts are included in the complete 3D overlay.")
+                for mesh_index, uploaded_obj in enumerate(obj_files):
+                    keep_part = st.checkbox(
+                        uploaded_obj.name,
+                        value=True,
+                        key=f"obj_keep_{obj_upload_seed}_{mesh_index}_{uploaded_obj.name}",
+                    )
+                    if keep_part:
+                        selected_obj_files.append(uploaded_obj)
+            if not selected_obj_files:
+                st.warning("Select at least one OBJ part to enable the 3D overlay.")
+
+        selected_fingerprint = hashlib.sha1(upload_fingerprint.hexdigest().encode("ascii"))
+        for selected_obj in selected_obj_files:
+            selected_fingerprint.update(selected_obj.name.encode("utf-8", errors="ignore"))
+        obj_upload_key = selected_fingerprint.hexdigest()[:12]
+
+        for mesh_index, uploaded_obj in enumerate(selected_obj_files):
             obj_bytes = uploaded_obj.getvalue()
             try:
                 parsed_meshes.append(
@@ -1574,7 +1389,6 @@ try:
                 )
             except RuntimeError as error:
                 st.error(f"{uploaded_obj.name}: {error}")
-        obj_upload_key = upload_fingerprint.hexdigest()[:12]
         obj_mesh_count = len(parsed_meshes)
         if parsed_meshes:
             combined_obj = combine_obj_meshes(parsed_meshes)
@@ -1619,7 +1433,7 @@ try:
                     with rot_c:
                         obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
                 else:
-                    st.caption("Use the placement panel below to rotate, move, and zoom the projected model.")
+                    st.caption("Use the placement panel below to rotate the model and move/resize the blue box.")
                 obj_transform_mode = st.selectbox(
                     "3D overlay transform",
                     ["Locked 2D placement", "PnP", "Similarity"],
@@ -1706,58 +1520,28 @@ try:
                 obj_rotate_y,
                 obj_rotate_z,
             ).T
-            model_extent_xy = float(np.ptp(obj_model_points_3d[:, :2], axis=0).max()) if len(obj_model_points_3d) else 2.0
-            model_extent_xy = max(model_extent_xy, 1e-6)
-            placement_state_key = f"obj_placement_state_{video_path.name}_{frame_index}_{obj_upload_key}"
-            saved_placement = st.session_state.get(placement_state_key, {})
-            obj_center_x = float(saved_placement.get("center_x", frame_width / 2))
-            obj_center_y = float(saved_placement.get("center_y", frame_height / 2))
-            obj_scale = float(saved_placement.get("scale", max(40, min(frame_width, frame_height) // 4)))
-
             placement_frame, placement_scale = resize_for_canvas(frame_rgb)
             placement_height, placement_width = placement_frame.shape[:2]
-            placement_model_points = project_normalized_obj_vertices(
-                obj_model_points_3d,
-                placement_width,
-                placement_height,
-                obj_center_x * placement_scale,
-                obj_center_y * placement_scale,
-                obj_scale * placement_scale,
-            )
-            placement_rotation_key = f"{obj_rotate_x}_{obj_rotate_y}_{obj_rotate_z}"
             placement_result = st_canvas(
-                fill_color="rgba(60, 220, 255, 0.00)",
-                stroke_width=2,
+                fill_color="rgba(60, 220, 255, 0.08)",
+                stroke_width=3,
                 stroke_color="#3cdcff",
                 background_image=Image.fromarray(placement_frame),
                 update_streamlit=True,
                 height=placement_height,
                 width=placement_width,
                 drawing_mode="transform",
-                initial_drawing=obj_control_model_drawing(
-                    placement_width,
-                    placement_height,
-                    placement_model_points,
-                    obj_faces,
-                    obj_face_colors,
-                ),
+                initial_drawing=obj_control_box_drawing(placement_width, placement_height),
                 display_toolbar=False,
-                key=f"obj_placement_{video_path.name}_{frame_index}_{obj_upload_key}_{placement_rotation_key}",
+                key=f"obj_placement_{video_path.name}_{frame_index}_{obj_upload_key}",
             )
             obj_center_x, obj_center_y, obj_scale = obj_placement_from_canvas(
                 placement_result.json_data,
                 placement_scale,
                 frame_width,
                 frame_height,
-                model_extent=model_extent_xy,
-                base_scale_px=obj_scale,
             )
-            st.session_state[placement_state_key] = {
-                "center_x": obj_center_x,
-                "center_y": obj_center_y,
-                "scale": obj_scale,
-            }
-            st.caption("Drag the projected model to translate it. Resize it to zoom. Rotation uses the sliders above.")
+            st.caption("Move the blue box to translate the model. Resize it to zoom. Rotation uses the sliders above.")
             obj_projected_points = project_normalized_obj_vertices(
                 obj_model_points_3d,
                 frame_width,
