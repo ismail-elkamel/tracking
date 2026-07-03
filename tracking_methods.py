@@ -63,10 +63,12 @@ class ObjOverlayMetadata:
     pnp_min_inliers: int = 6
     show_anchor_points: bool = True
     render_style: str = "Wireframe"
+    show_pose_text: bool = False
 
 
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
 OBJ_PNP_POSE_CACHE: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+OBJ_HOMOGRAPHY_ROTATION_CACHE: dict[str, tuple[np.ndarray, str]] = {}
 
 
 def obj_edges_from_faces(
@@ -105,8 +107,10 @@ def register_obj_overlay(
     pnp_min_inliers: int = 6,
     show_anchor_points: bool = True,
     render_style: str = "Wireframe",
+    show_pose_text: bool = False,
 ) -> None:
     OBJ_PNP_POSE_CACHE.pop(label, None)
+    OBJ_HOMOGRAPHY_ROTATION_CACHE.pop(label, None)
     if face_colors is None:
         face_colors = [(60, 220, 255)] * len(faces)
     edges, edge_colors = obj_edges_from_faces(faces, face_colors)
@@ -126,6 +130,7 @@ def register_obj_overlay(
         pnp_min_inliers=int(pnp_min_inliers),
         show_anchor_points=bool(show_anchor_points),
         render_style=render_style,
+        show_pose_text=bool(show_pose_text),
     )
 
 
@@ -284,12 +289,9 @@ def write_prompt_file(
     return path
 
 
-def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
-    metadata = OBJ_OVERLAYS.get(label)
-    if metadata is None:
-        return None
-    source = metadata.anchor_points
-    target = tracked_points.astype(np.float32)
+def estimate_partial_2d_transform(source: np.ndarray, target: np.ndarray) -> np.ndarray | None:
+    source = source.astype(np.float32)
+    target = target.astype(np.float32)
     if len(source) < 1 or len(target) < 1:
         return None
     count = min(len(source), len(target))
@@ -327,6 +329,13 @@ def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray
     return transform
 
 
+def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
+    metadata = OBJ_OVERLAYS.get(label)
+    if metadata is None:
+        return None
+    return estimate_partial_2d_transform(metadata.anchor_points, tracked_points)
+
+
 def apply_obj_transform(points: np.ndarray, transform: np.ndarray | None) -> np.ndarray:
     if transform is None:
         return points.astype(np.float32)
@@ -345,6 +354,54 @@ def obj_camera_matrix(metadata: ObjOverlayMetadata) -> np.ndarray:
         ],
         dtype=np.float32,
     )
+
+
+def rotation_matrix_to_euler_xyz(rotation: np.ndarray) -> tuple[float, float, float]:
+    sy = float(np.sqrt(rotation[0, 0] * rotation[0, 0] + rotation[1, 0] * rotation[1, 0]))
+    singular = sy < 1e-6
+    if not singular:
+        x = float(np.arctan2(rotation[2, 1], rotation[2, 2]))
+        y = float(np.arctan2(-rotation[2, 0], sy))
+        z = float(np.arctan2(rotation[1, 0], rotation[0, 0]))
+    else:
+        x = float(np.arctan2(-rotation[1, 2], rotation[1, 1]))
+        y = float(np.arctan2(-rotation[2, 0], sy))
+        z = 0.0
+    return tuple(float(np.degrees(value)) for value in (x, y, z))
+
+
+def pose_text_from_rotation(rotation: np.ndarray, prefix: str) -> str:
+    rx, ry, rz = rotation_matrix_to_euler_xyz(rotation)
+    angle = float(np.degrees(np.arccos(np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0))))
+    return f"{prefix} rx={rx:+.1f} ry={ry:+.1f} rz={rz:+.1f} angle={angle:.1f}"
+
+
+def draw_pose_text(output: np.ndarray, text: str | None) -> np.ndarray:
+    if not text:
+        return output
+    height, _ = output.shape[:2]
+    y = max(26, min(height - 12, 28))
+    cv2.putText(
+        output,
+        text,
+        (12, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.62,
+        (0, 0, 0),
+        4,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        output,
+        text,
+        (12, y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.62,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+    return output
 
 
 def estimate_obj_pnp_pose(
@@ -443,6 +500,85 @@ def project_obj_anchors_with_pnp(label: str, tracked_points: np.ndarray) -> np.n
     return project_obj_points_with_pnp(metadata, tracked_points, metadata.anchor_points_3d)
 
 
+def estimate_obj_homography_rotation(
+    label: str,
+    metadata: ObjOverlayMetadata,
+    tracked_points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, str] | None:
+    count = min(len(metadata.anchor_points), len(tracked_points))
+    if count < 4:
+        return None
+
+    source = metadata.anchor_points[:count].astype(np.float32)
+    target = tracked_points[:count].astype(np.float32)
+    valid = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
+    source = source[valid]
+    target = target[valid]
+    if len(source) < 4:
+        return None
+
+    homography, inliers = cv2.findHomography(
+        source,
+        target,
+        cv2.RANSAC,
+        max(3.0, float(metadata.pnp_reprojection_error)),
+    )
+    if homography is None or not np.isfinite(homography).all():
+        cached = OBJ_HOMOGRAPHY_ROTATION_CACHE.get(label)
+        if cached is None:
+            return None
+        rotation, text = cached
+    else:
+        try:
+            _, rotations, _, _ = cv2.decomposeHomographyMat(
+                homography.astype(np.float64),
+                obj_camera_matrix(metadata).astype(np.float64),
+            )
+        except cv2.error:
+            rotations = []
+        if not rotations:
+            cached = OBJ_HOMOGRAPHY_ROTATION_CACHE.get(label)
+            if cached is None:
+                return None
+            rotation, text = cached
+        else:
+            valid_rotations = [rotation for rotation in rotations if np.linalg.det(rotation) > 0]
+            if not valid_rotations:
+                valid_rotations = list(rotations)
+            rotation = min(
+                valid_rotations,
+                key=lambda candidate: abs(
+                    float(np.arccos(np.clip((np.trace(candidate) - 1.0) / 2.0, -1.0, 1.0)))
+                ),
+            ).astype(np.float32)
+            text = pose_text_from_rotation(rotation, "H")
+            OBJ_HOMOGRAPHY_ROTATION_CACHE[label] = (rotation.copy(), text)
+
+    transform = estimate_partial_2d_transform(source, target)
+    center = np.mean(metadata.model_points, axis=0).astype(np.float32)
+    if transform is not None:
+        center = apply_obj_transform(center[None], transform)[0]
+        linear = transform[:, :2].astype(np.float32)
+        scale_multiplier = float(np.sqrt(max(abs(np.linalg.det(linear)), 1e-6)))
+    else:
+        scale_multiplier = 1.0
+
+    source_extent = float(np.ptp(metadata.model_points_3d[:, :2], axis=0).max())
+    image_extent = float(np.ptp(metadata.model_points, axis=0).max())
+    base_scale = image_extent / max(source_extent, 1e-6)
+    scale = max(1.0, base_scale * scale_multiplier)
+
+    rotated_model = metadata.model_points_3d @ rotation.T
+    rotated_anchors = metadata.anchor_points_3d @ rotation.T
+    model_points = np.empty((len(rotated_model), 2), dtype=np.float32)
+    anchor_points = np.empty((len(rotated_anchors), 2), dtype=np.float32)
+    model_points[:, 0] = center[0] + rotated_model[:, 0] * scale
+    model_points[:, 1] = center[1] - rotated_model[:, 1] * scale
+    anchor_points[:, 0] = center[0] + rotated_anchors[:, 0] * scale
+    anchor_points[:, 1] = center[1] - rotated_anchors[:, 1] * scale
+    return model_points, anchor_points, text
+
+
 def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.ndarray:
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
@@ -451,6 +587,10 @@ def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.nda
         projected = project_obj_with_pnp(label, tracked_points)
         if projected is not None:
             return projected
+    if metadata.transform_mode == "Camera rotation (homography)":
+        projected = estimate_obj_homography_rotation(label, metadata, tracked_points)
+        if projected is not None:
+            return projected[0]
     transform = estimate_obj_transform(label, tracked_points)
     return apply_obj_transform(metadata.model_points, transform)
 
@@ -481,11 +621,25 @@ def draw_obj_mesh(
 ) -> np.ndarray:
     base_frame = output.copy()
     metadata = OBJ_OVERLAYS.get(label)
+    pose_text = None
     if metadata is not None and metadata.transform_mode == "PnP":
         pose = estimate_cached_obj_pnp_pose(label, metadata, tracked_points)
         if pose is not None:
             points = project_obj_points_from_pose(metadata, metadata.model_points_3d, pose)
             anchor_points = project_obj_points_from_pose(metadata, metadata.anchor_points_3d, pose)
+            if metadata.show_pose_text:
+                rotation, _ = cv2.Rodrigues(pose[0])
+                pose_text = pose_text_from_rotation(rotation, "PnP")
+        else:
+            transform = estimate_obj_transform(label, tracked_points)
+            points = apply_obj_transform(metadata.model_points, transform)
+            anchor_points = apply_obj_transform(metadata.anchor_points, transform)
+    elif metadata is not None and metadata.transform_mode == "Camera rotation (homography)":
+        rotated = estimate_obj_homography_rotation(label, metadata, tracked_points)
+        if rotated is not None:
+            points, anchor_points, pose_text = rotated
+            if not metadata.show_pose_text:
+                pose_text = None
         else:
             transform = estimate_obj_transform(label, tracked_points)
             points = apply_obj_transform(metadata.model_points, transform)
@@ -531,6 +685,7 @@ def draw_obj_mesh(
             for point in np.round(anchor_points[:: max(1, len(anchor_points) // 260)]).astype(np.int32):
                 if 0 <= point[0] < width and 0 <= point[1] < height:
                     cv2.circle(output, tuple(point), 6, (255, 72, 92), 2, lineType=cv2.LINE_AA)
+        output = draw_pose_text(output, pose_text)
         return apply_instrument_occlusion(output, base_frame, instrument_mask)
 
     overlay = output.copy()
@@ -576,6 +731,7 @@ def draw_obj_mesh(
         for point in np.round(anchor_points[:: max(1, len(anchor_points) // 220)]).astype(np.int32):
             if 0 <= point[0] < width and 0 <= point[1] < height:
                 cv2.circle(output, tuple(point), 6, (255, 72, 92), 2, lineType=cv2.LINE_AA)
+    output = draw_pose_text(output, pose_text)
     return apply_instrument_occlusion(output, base_frame, instrument_mask)
 
 
@@ -826,6 +982,36 @@ def sync_to_video_clock(start_time: float, relative_frame: int, fps: float) -> N
         time.sleep(target_elapsed - actual_elapsed)
 
 
+def open_capture_at(path: str, start_frame: int) -> tuple[cv2.VideoCapture, np.ndarray]:
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {path}")
+
+    if start_frame > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    ok, frame_bgr = cap.read()
+    if ok and frame_bgr is not None:
+        return cap, frame_bgr
+
+    cap.release()
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not reopen video: {path}")
+    for _ in range(max(0, int(start_frame))):
+        ok, _ = cap.read()
+        if not ok:
+            break
+    ok, frame_bgr = cap.read()
+    if ok and frame_bgr is not None:
+        return cap, frame_bgr
+
+    cap.release()
+    raise RuntimeError(
+        f"Could not read frame {start_frame} from {path}. "
+        "Try a shorter interval, start at frame 0, or convert the video to an OpenCV-friendly MP4."
+    )
+
+
 def open_output_writer(output_path: str | Path | None, frame_rgb: np.ndarray, fps: float):
     if output_path is None:
         return None
@@ -842,6 +1028,16 @@ def open_output_writer(output_path: str | Path | None, frame_rgb: np.ndarray, fp
     if not writer.isOpened():
         raise RuntimeError(f"Could not create output video: {path}")
     return writer
+
+
+def validate_output_video(path: Path | None, frames_written: int, tracker_name: str) -> Path | None:
+    if path is None:
+        return None
+    if frames_written <= 0:
+        raise RuntimeError(f"{tracker_name} did not write any output frames.")
+    if not path.exists() or path.stat().st_size == 0:
+        raise RuntimeError(f"{tracker_name} finished, but the output video was not created: {path}")
+    return path
 
 
 def write_output_frame(writer, frame_rgb: np.ndarray) -> None:
@@ -1108,8 +1304,7 @@ def track_with_cotracker3_online(
     with st.spinner("Loading CoTracker3 Online..."):
         model, device = load_cotracker3_online(device_name)
 
-    cap = cv2.VideoCapture(path)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    cap, first_frame_bgr = open_capture_at(path, start_frame)
 
     window: list[tuple[int, np.ndarray, np.ndarray]] = []
     queries = None
@@ -1123,9 +1318,10 @@ def track_with_cotracker3_online(
     saved_path = Path(output_path) if output_path else None
     last_valid_points = flat_points.copy()
     visible_points = np.ones(len(flat_points), dtype=bool)
+    frames_written = 0
 
     def process_window() -> None:
-        nonlocal is_first_step, last_displayed_frame, last_processed_frame, last_valid_points, visible_points
+        nonlocal is_first_step, last_displayed_frame, last_processed_frame, last_valid_points, visible_points, frames_written
         if not window:
             return
 
@@ -1197,6 +1393,7 @@ def track_with_cotracker3_online(
                 frame_placeholder,
                 instrument_mask,
             )
+            frames_written += 1
             status_placeholder.caption(
                 f"CoTracker3 frame {absolute_frame} / {end_frame} on {device}"
             )
@@ -1210,9 +1407,12 @@ def track_with_cotracker3_online(
             if relative_frame != 0 and relative_frame % step == 0:
                 process_window()
 
-            ok, frame_bgr = cap.read()
-            if not ok:
-                break
+            if absolute_frame == start_frame:
+                frame_bgr = first_frame_bgr
+            else:
+                ok, frame_bgr = cap.read()
+                if not ok:
+                    break
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             model_rgb, current_scale = resize_for_model(frame_rgb, model_max_side)
             if queries is None:
@@ -1252,6 +1452,7 @@ def track_with_cotracker3_online(
                     frame_placeholder,
                     instrument_mask if instrument_avoidance is not None else None,
                 )
+                frames_written += 1
             window.append((absolute_frame, model_rgb, frame_rgb))
             if len(window) > step * 2:
                 window = window[-step * 2 :]
@@ -1263,7 +1464,7 @@ def track_with_cotracker3_online(
         if output_writer is not None:
             output_writer.release()
 
-    return saved_path
+    return validate_output_video(saved_path, frames_written, "CoTracker3 Online")
 
 
 def track_with_cotracker3_offline(
@@ -1295,8 +1496,7 @@ def track_with_cotracker3_offline(
         model, device = load_cotracker3_offline(device_name)
 
     chunk_frames = max(2, int(chunk_frames))
-    cap = cv2.VideoCapture(path)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    cap, first_frame_bgr = open_capture_at(path, start_frame)
     output_writer = None
     saved_path = Path(output_path) if output_path else None
     start_time = time.perf_counter()
@@ -1316,9 +1516,12 @@ def track_with_cotracker3_offline(
             for _ in range(chunk_frames):
                 if absolute_frame > end_frame:
                     break
-                ok, frame_bgr = cap.read()
-                if not ok:
-                    break
+                if absolute_frame == start_frame:
+                    frame_bgr = first_frame_bgr
+                else:
+                    ok, frame_bgr = cap.read()
+                    if not ok:
+                        break
                 frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 model_rgb, current_scale = resize_for_model(frame_rgb, model_max_side)
                 if not model_frames:
@@ -1418,10 +1621,7 @@ def track_with_cotracker3_offline(
         if output_writer is not None:
             output_writer.release()
 
-    if frames_written == 0:
-        st.error("Could not read frames for CoTracker3 Offline.")
-        return
-    return saved_path
+    return validate_output_video(saved_path, frames_written, "CoTracker3 Offline")
 
 
 def track_with_litetracker(
@@ -1454,21 +1654,24 @@ def track_with_litetracker(
     if hasattr(model, "init_video_online_processing"):
         model.init_video_online_processing()
 
-    cap = cv2.VideoCapture(path)
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    cap, first_frame_bgr = open_capture_at(path, start_frame)
     queries = None
     start_time = time.perf_counter()
     output_writer = None
     saved_path = Path(output_path) if output_path else None
     last_valid_points = flat_points.copy()
     visible_points = np.ones(len(flat_points), dtype=bool)
+    frames_written = 0
 
     try:
         with torch.inference_mode():
             for absolute_frame in range(start_frame, end_frame + 1):
-                ok, frame_bgr = cap.read()
-                if not ok:
-                    break
+                if absolute_frame == start_frame:
+                    frame_bgr = first_frame_bgr
+                else:
+                    ok, frame_bgr = cap.read()
+                    if not ok:
+                        break
 
                 frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 model_rgb, model_scale = resize_for_model(frame_rgb, model_max_side)
@@ -1520,6 +1723,7 @@ def track_with_litetracker(
                 status_placeholder.caption(
                     f"LiteTracker frame {absolute_frame} / {end_frame} on {device}"
                 )
+                frames_written += 1
                 if show_live_preview:
                     sync_to_video_clock(start_time, absolute_frame - start_frame, fps)
     finally:
@@ -1527,7 +1731,7 @@ def track_with_litetracker(
         if output_writer is not None:
             output_writer.release()
 
-    return saved_path
+    return validate_output_video(saved_path, frames_written, "LiteTracker")
 
 
 def track_with_lk(
