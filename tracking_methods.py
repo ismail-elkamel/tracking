@@ -905,6 +905,21 @@ def points_outside_instrument(points: np.ndarray, instrument_mask: np.ndarray | 
     return in_bounds & ~instrument_mask[y, x]
 
 
+def points_clear_of_instrument(
+    points: np.ndarray,
+    last_valid_points: np.ndarray,
+    instrument_mask: np.ndarray | None,
+) -> np.ndarray:
+    if instrument_mask is None or len(points) == 0:
+        return np.ones(len(points), dtype=bool)
+
+    current_clear = points_outside_instrument(points, instrument_mask)
+    if len(last_valid_points) != len(points):
+        return current_clear
+    last_clear = points_outside_instrument(last_valid_points, instrument_mask)
+    return current_clear & last_clear
+
+
 def validate_tracked_points(
     points: np.ndarray,
     last_valid_points: np.ndarray,
@@ -1415,7 +1430,7 @@ def track_with_cotracker3_online(
             if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                 instrument_mask = predict_instrument_mask(original_rgb, instrument_avoidance)
                 valid_mask = visibility_mask_for_frame(visibility, predicted_index, len(points))
-                valid_mask &= points_outside_instrument(points, instrument_mask)
+                valid_mask &= points_clear_of_instrument(points, last_valid_points, instrument_mask)
                 valid_mask = validate_tracked_points(
                     points,
                     last_valid_points,
@@ -1474,7 +1489,7 @@ def track_with_cotracker3_online(
                 output_writer = open_output_writer(saved_path, frame_rgb, fps)
                 if instrument_avoidance is not None or track_validation is not None:
                     instrument_mask = predict_instrument_mask(frame_rgb, instrument_avoidance)
-                    valid_mask = points_outside_instrument(flat_points, instrument_mask)
+                    valid_mask = points_clear_of_instrument(flat_points, last_valid_points, instrument_mask)
                     valid_mask = validate_tracked_points(
                         flat_points,
                         last_valid_points,
@@ -1626,7 +1641,7 @@ def track_with_cotracker3_offline(
                     valid_mask = visibility_mask_for_frame(visibility, relative_frame, len(points))
                     if instrument_avoidance is not None:
                         instrument_mask = predict_instrument_mask(frame_rgb, instrument_avoidance)
-                        valid_mask = valid_mask & points_outside_instrument(points, instrument_mask)
+                        valid_mask = valid_mask & points_clear_of_instrument(points, last_valid_points, instrument_mask)
                     valid_mask = validate_tracked_points(
                         points,
                         last_valid_points,
@@ -1746,7 +1761,7 @@ def track_with_litetracker(
                 if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                     instrument_mask = predict_instrument_mask(frame_rgb, instrument_avoidance)
                     valid_mask = visibility_mask_for_frame(visibility, -1, len(points))
-                    valid_mask &= points_outside_instrument(points, instrument_mask)
+                    valid_mask &= points_clear_of_instrument(points, last_valid_points, instrument_mask)
                     valid_mask = validate_tracked_points(
                         points,
                         last_valid_points,
@@ -1830,7 +1845,7 @@ def track_with_lk(
     if instrument_avoidance is not None or track_validation is not None:
         instrument_mask = predict_instrument_mask(rgb, instrument_avoidance)
         for index, points in enumerate(active_tracks):
-            valid_mask = points_outside_instrument(points, instrument_mask)
+            valid_mask = points_clear_of_instrument(points, points, instrument_mask)
             visible_tracks[index] = validate_tracked_points(
                 points,
                 points,
@@ -1880,7 +1895,11 @@ def track_with_lk(
                     if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                         valid_mask = status
                         if instrument_avoidance is not None:
-                            valid_mask = valid_mask & points_outside_instrument(candidate_points, instrument_mask)
+                            valid_mask = valid_mask & points_clear_of_instrument(
+                                candidate_points,
+                                active_tracks[index],
+                                instrument_mask,
+                            )
                         valid_mask = validate_tracked_points(
                             candidate_points,
                             updated,
