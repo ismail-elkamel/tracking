@@ -526,14 +526,12 @@ Use `3D overlay transform` to choose how the full OBJ follows the tracked anchor
 
 - `Locked 2D placement`: default mode. It keeps the OBJ exactly as you placed it on the start frame, then moves/rotates/scales that same projected model from the tracked anchors. Use this when you do not want the selected points to redefine the 3D model pose.
 - `PnP`: estimates a 3D pose from OBJ vertex coordinates to tracked 2D anchors, then reprojects the complete OBJ. This is the best first choice for keeping the model coherent during zoom or camera/viewpoint changes.
-- `Camera rotation (homography)`: estimates a planar homography from the tracked anchors, decomposes it into an approximate camera rotation, then rotates the complete OBJ with that detected rotation. Use it when your tracked points lie on one mostly fixed visible plane and the camera rotates around that plane.
 - `Similarity`: older 2D fallback using translation, rotation, and scale. Use it if PnP becomes unstable on a difficult clip.
 
 PnP uses an approximate camera matrix from the video size when no calibration is available. For better registration later, replace that approximation with real laparoscope camera intrinsics. The PnP controls let you tune the pose robustness:
 
-- `Pose reprojection error px`: increase it if good points are rejected because tracking is noisy; decrease it if the model jumps because bad points are accepted. PnP and homography rotation both use this value.
+- `PnP reprojection error px`: increase it if good points are rejected because tracking is noisy; decrease it if the model jumps because bad points are accepted.
 - `PnP min inliers`: minimum number of good tracked anchors needed before the app accepts the PnP pose. The default is `6` for manual testing. If this is too high, the app falls back to the 2D similarity transform more often.
-- `Show detected rotation text`: writes `rx`, `ry`, `rz`, and the total angle on the output video so you can see the rotation currently estimated from the tracked anchors.
 - `3D anchor source`: choose `Manual points on model` to draw the OBJ anchors yourself. Each point you draw is matched to the nearest projected OBJ vertex, then tracked in the video while the full OBJ is reprojected from those fixed 3D correspondences. Points clicked too far from the projected OBJ are ignored. Choose `Auto sampled OBJ points` only when you want the app to create the OBJ anchors automatically.
 - `3D model tracking points`: number of visible OBJ anchors sent to the tracker. More points make PnP more stable, but also make tracking slower. The default is intentionally low so testing does not start with hundreds of heavy anchors.
 - `3D edge anchor ratio`: fraction of tracking anchors forced near the projected OBJ silhouette. Keep this high, around `0.85`, when you want points on the model border instead of inside the volume.
@@ -544,7 +542,6 @@ Manual anchor behavior:
 
 - `1` point keeps the full OBJ attached by translation.
 - `2-5` points use the 2D similarity fallback.
-- `4+` well-spread points on the same visible plane can use `Camera rotation (homography)`.
 - `6+` points can use PnP, but the number must also satisfy `PnP min inliers`.
 
 The preview and final video render all OBJ faces instead of only the first faces, so dense kidney meshes should appear as the full projected model. For multi-OBJ exports, upload files from the same 3D scene/export so their coordinates already match each other before the app applies the shared placement transform.
