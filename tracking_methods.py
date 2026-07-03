@@ -44,6 +44,9 @@ class TrackValidationConfig:
     max_jump_px: float = 80.0
     content_margin: int = 24
     black_threshold: int = 12
+    motion_residual_px: float = 30.0
+    min_visible_points: int = 3
+    min_visible_fraction: float = 0.15
 
 
 @dataclass(frozen=True)
@@ -920,6 +923,66 @@ def points_clear_of_instrument(
     return current_clear & last_clear
 
 
+def reject_motion_outliers(
+    points: np.ndarray,
+    last_valid_points: np.ndarray,
+    valid_mask: np.ndarray,
+    max_residual_px: float,
+) -> np.ndarray:
+    if max_residual_px <= 0 or len(points) != len(last_valid_points):
+        return valid_mask
+
+    candidate_indices = np.flatnonzero(valid_mask)
+    if len(candidate_indices) < 4:
+        return valid_mask
+
+    source = last_valid_points[candidate_indices].astype(np.float32)
+    target = points[candidate_indices].astype(np.float32)
+    finite = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
+    if int(finite.sum()) < 4:
+        return valid_mask
+
+    finite_indices = candidate_indices[finite]
+    transform, inliers = cv2.estimateAffinePartial2D(
+        source[finite],
+        target[finite],
+        method=cv2.RANSAC,
+        ransacReprojThreshold=float(max_residual_px),
+        maxIters=200,
+        confidence=0.99,
+    )
+    if transform is None:
+        return valid_mask
+
+    projected = apply_obj_transform(last_valid_points[finite_indices], transform)
+    residual = np.linalg.norm(projected - points[finite_indices], axis=1)
+    kept = residual <= float(max_residual_px)
+    if inliers is not None:
+        kept &= inliers.reshape(-1).astype(bool)
+
+    filtered = valid_mask.copy()
+    filtered[finite_indices] = kept
+    return filtered
+
+
+def enforce_minimum_visible_points(
+    valid_mask: np.ndarray,
+    total_points: int,
+    config: TrackValidationConfig,
+) -> np.ndarray:
+    if total_points < 6:
+        return valid_mask
+
+    min_points = max(0, int(config.min_visible_points))
+    min_fraction_points = int(np.ceil(float(config.min_visible_fraction) * float(total_points)))
+    required = max(min_points, min_fraction_points)
+    if required <= 0:
+        return valid_mask
+    if int(valid_mask.sum()) >= required:
+        return valid_mask
+    return np.zeros_like(valid_mask, dtype=bool)
+
+
 def validate_tracked_points(
     points: np.ndarray,
     last_valid_points: np.ndarray,
@@ -965,6 +1028,14 @@ def validate_tracked_points(
     if max_jump > 0 and len(last_valid_points) == len(points):
         jump = np.linalg.norm(points - last_valid_points, axis=1)
         valid &= jump <= max_jump
+
+    valid = reject_motion_outliers(
+        points,
+        last_valid_points,
+        valid,
+        float(config.motion_residual_px),
+    )
+    valid = enforce_minimum_visible_points(valid, len(points), config)
 
     return valid
 
