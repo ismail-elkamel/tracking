@@ -350,6 +350,88 @@ def draw_obj_overlay(
     return output
 
 
+def obj_edges_from_faces(faces: list[list[int]]) -> list[tuple[int, int]]:
+    edges: set[tuple[int, int]] = set()
+    for face in faces:
+        if len(face) < 2:
+            continue
+        for start, end in zip(face, face[1:] + face[:1]):
+            if start == end:
+                continue
+            edges.add((start, end) if start < end else (end, start))
+    return sorted(edges)
+
+
+def obj_control_model_drawing(
+    width: int,
+    height: int,
+    points_xy: np.ndarray,
+    faces: list[list[int]],
+    max_segments: int = 1200,
+) -> dict[str, Any]:
+    if len(points_xy) == 0:
+        return obj_control_box_drawing(width, height)
+
+    edges = obj_edges_from_faces(faces)
+    if len(edges) > max_segments:
+        sample_indices = np.linspace(0, len(edges) - 1, max_segments, dtype=np.int32)
+        edges = [edges[int(index)] for index in sample_indices]
+
+    path: list[list[float | str]] = []
+    for start, end in edges:
+        if start < 0 or end < 0 or start >= len(points_xy) or end >= len(points_xy):
+            continue
+        p1 = points_xy[start]
+        p2 = points_xy[end]
+        p1_visible = -width <= p1[0] <= width * 2 and -height <= p1[1] <= height * 2
+        p2_visible = -width <= p2[0] <= width * 2 and -height <= p2[1] <= height * 2
+        if not (p1_visible or p2_visible):
+            continue
+        path.append(["M", float(p1[0]), float(p1[1])])
+        path.append(["L", float(p2[0]), float(p2[1])])
+
+    if not path:
+        pts = np.round(points_xy).astype(np.float32)
+        in_canvas = (
+            (pts[:, 0] >= 0)
+            & (pts[:, 0] < width)
+            & (pts[:, 1] >= 0)
+            & (pts[:, 1] < height)
+        )
+        pts = pts[in_canvas]
+        if len(pts) >= 3:
+            hull = cv2.convexHull(pts).reshape(-1, 2)
+            path = [["M", float(hull[0, 0]), float(hull[0, 1])]]
+            path.extend(["L", float(point[0]), float(point[1])] for point in hull[1:])
+            path.append(["L", float(hull[0, 0]), float(hull[0, 1])])
+        else:
+            return obj_control_box_drawing(width, height)
+
+    return {
+        "version": "4.4.0",
+        "objects": [
+            {
+                "type": "path",
+                "path": path,
+                "fill": "",
+                "stroke": "#3cdcff",
+                "strokeWidth": 2,
+                "strokeLineCap": "round",
+                "strokeLineJoin": "round",
+                "transparentCorners": False,
+                "cornerColor": "#ffff42",
+                "cornerStrokeColor": "#111111",
+                "borderColor": "#ffff42",
+                "lockRotation": True,
+                "lockScalingFlip": True,
+                "lockUniScaling": True,
+                "hasRotatingPoint": False,
+                "objectCaching": False,
+            }
+        ],
+    }
+
+
 def obj_tracks_from_projection(
     points_xy: np.ndarray,
     faces: list[list[int]],
@@ -471,21 +553,35 @@ def obj_placement_from_canvas(
     canvas_scale: float,
     frame_width: int,
     frame_height: int,
+    model_extent: float | None = None,
 ) -> tuple[float, float, float]:
     default_scale = max(40.0, min(frame_width, frame_height) / 4.0)
     if not json_data:
         return frame_width / 2.0, frame_height / 2.0, default_scale
     for obj in json_data.get("objects", []):
-        if obj.get("type") != "rect":
-            continue
-        left = float(obj.get("left", 0.0))
-        top = float(obj.get("top", 0.0))
-        width = float(obj.get("width", 0.0)) * float(obj.get("scaleX", 1.0))
-        height = float(obj.get("height", 0.0)) * float(obj.get("scaleY", 1.0))
-        center_x = (left + width / 2.0) / canvas_scale
-        center_y = (top + height / 2.0) / canvas_scale
-        scale_px = max(10.0, max(width, height) / (2.0 * canvas_scale))
-        return center_x, center_y, scale_px
+        obj_type = obj.get("type")
+        if obj_type == "rect":
+            left = float(obj.get("left", 0.0))
+            top = float(obj.get("top", 0.0))
+            width = float(obj.get("width", 0.0)) * float(obj.get("scaleX", 1.0))
+            height = float(obj.get("height", 0.0)) * float(obj.get("scaleY", 1.0))
+            center_x = (left + width / 2.0) / canvas_scale
+            center_y = (top + height / 2.0) / canvas_scale
+            scale_px = max(10.0, max(width, height) / (2.0 * canvas_scale))
+            return center_x, center_y, scale_px
+        if obj_type in {"path", "polygon"}:
+            points = fabric_points(obj)
+            if len(points) < 2:
+                continue
+            point_array = np.asarray(points, dtype=np.float32)
+            min_xy = point_array.min(axis=0)
+            max_xy = point_array.max(axis=0)
+            size_xy = np.maximum(max_xy - min_xy, 1.0)
+            extent = float(model_extent or 2.0)
+            center_x = float((min_xy[0] + max_xy[0]) / (2.0 * canvas_scale))
+            center_y = float((min_xy[1] + max_xy[1]) / (2.0 * canvas_scale))
+            scale_px = max(10.0, float(size_xy.max()) / (canvas_scale * max(extent, 1e-6)))
+            return center_x, center_y, scale_px
     return frame_width / 2.0, frame_height / 2.0, default_scale
 
 
@@ -1331,6 +1427,9 @@ try:
     obj_pnp_min_inliers = 6
     obj_show_anchor_points = False
     obj_render_style = "Wireframe"
+    obj_rotate_x = 0
+    obj_rotate_y = 0
+    obj_rotate_z = 0
     obj_model_points_3d = np.empty((0, 3), dtype=np.float32)
     obj_vertices = np.empty((0, 3), dtype=np.float32)
     obj_normalized_vertices = np.empty((0, 3), dtype=np.float32)
@@ -1400,13 +1499,16 @@ try:
                     obj_center_x = frame_width / 2
                     obj_center_y = frame_height / 2
                     obj_scale = max(40, min(frame_width, frame_height) // 4)
-                rot_a, rot_b, rot_c = st.columns(3)
-                with rot_a:
-                    obj_rotate_x = st.slider("Rotate X", -180, 180, 0, 1)
-                with rot_b:
-                    obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
-                with rot_c:
-                    obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
+                if not use_mouse_obj_placement:
+                    rot_a, rot_b, rot_c = st.columns(3)
+                    with rot_a:
+                        obj_rotate_x = st.slider("Rotate X", -180, 180, 0, 1)
+                    with rot_b:
+                        obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
+                    with rot_c:
+                        obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
+                else:
+                    st.caption("Use the placement panel below to rotate, move, and zoom the projected model.")
                 obj_transform_mode = st.selectbox(
                     "3D overlay transform",
                     ["Locked 2D placement", "PnP", "Similarity"],
@@ -1480,28 +1582,69 @@ try:
         placement_column, annotation_column = st.columns([1, 1], gap="large")
         with placement_column:
             st.subheader("Place 3D model")
+            rot_a, rot_b, rot_c = st.columns(3)
+            with rot_a:
+                obj_rotate_x = st.slider("Rotate X", -180, 180, 0, 1, key=f"obj_mouse_rx_{obj_upload_key}")
+            with rot_b:
+                obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1, key=f"obj_mouse_ry_{obj_upload_key}")
+            with rot_c:
+                obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1, key=f"obj_mouse_rz_{obj_upload_key}")
+
+            obj_model_points_3d = obj_normalized_vertices @ rotation_matrix_xyz(
+                obj_rotate_x,
+                obj_rotate_y,
+                obj_rotate_z,
+            ).T
+            model_extent_xy = float(np.ptp(obj_model_points_3d[:, :2], axis=0).max()) if len(obj_model_points_3d) else 2.0
+            model_extent_xy = max(model_extent_xy, 1e-6)
+            placement_state_key = f"obj_placement_state_{video_path.name}_{frame_index}_{obj_upload_key}"
+            saved_placement = st.session_state.get(placement_state_key, {})
+            obj_center_x = float(saved_placement.get("center_x", frame_width / 2))
+            obj_center_y = float(saved_placement.get("center_y", frame_height / 2))
+            obj_scale = float(saved_placement.get("scale", max(40, min(frame_width, frame_height) // 4)))
+
             placement_frame, placement_scale = resize_for_canvas(frame_rgb)
             placement_height, placement_width = placement_frame.shape[:2]
+            placement_model_points = project_normalized_obj_vertices(
+                obj_model_points_3d,
+                placement_width,
+                placement_height,
+                obj_center_x * placement_scale,
+                obj_center_y * placement_scale,
+                obj_scale * placement_scale,
+            )
+            placement_rotation_key = f"{obj_rotate_x}_{obj_rotate_y}_{obj_rotate_z}"
             placement_result = st_canvas(
-                fill_color="rgba(60, 220, 255, 0.08)",
-                stroke_width=3,
+                fill_color="rgba(60, 220, 255, 0.00)",
+                stroke_width=2,
                 stroke_color="#3cdcff",
                 background_image=Image.fromarray(placement_frame),
                 update_streamlit=True,
                 height=placement_height,
                 width=placement_width,
                 drawing_mode="transform",
-                initial_drawing=obj_control_box_drawing(placement_width, placement_height),
+                initial_drawing=obj_control_model_drawing(
+                    placement_width,
+                    placement_height,
+                    placement_model_points,
+                    obj_faces,
+                ),
                 display_toolbar=False,
-                key=f"obj_placement_{video_path.name}_{frame_index}_{obj_upload_key}",
+                key=f"obj_placement_{video_path.name}_{frame_index}_{obj_upload_key}_{placement_rotation_key}",
             )
             obj_center_x, obj_center_y, obj_scale = obj_placement_from_canvas(
                 placement_result.json_data,
                 placement_scale,
                 frame_width,
                 frame_height,
+                model_extent=model_extent_xy,
             )
-            st.caption("Move the blue box to translate the model. Resize it to zoom.")
+            st.session_state[placement_state_key] = {
+                "center_x": obj_center_x,
+                "center_y": obj_center_y,
+                "scale": obj_scale,
+            }
+            st.caption("Drag the projected model to translate it. Resize it to zoom. Rotation uses the sliders above.")
             obj_projected_points = project_normalized_obj_vertices(
                 obj_model_points_3d,
                 frame_width,
@@ -1621,7 +1764,8 @@ try:
             preview_frame = frame_rgb
             if obj_overlay_enabled and obj_projected_points is not None and not preview_has_obj_tracks:
                 preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces, obj_face_colors)
-            st.image(draw_tracks(preview_frame, tracks, labels), channels="RGB", use_container_width=True)
+            preview_display_frame, _ = resize_for_canvas(draw_tracks(preview_frame, tracks, labels))
+            st.image(preview_display_frame, channels="RGB", use_container_width=True)
             st.caption(
                 f"{manual_point_count} manual point(s), {obj_mesh_count} 3D OBJ part(s), "
                 f"{obj_track_count} 3D model mesh group(s), "
@@ -1632,7 +1776,8 @@ try:
             preview_frame = frame_rgb
             if obj_overlay_enabled and obj_projected_points is not None:
                 preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces, obj_face_colors)
-            st.image(preview_frame, channels="RGB", use_container_width=True)
+            preview_display_frame, _ = resize_for_canvas(preview_frame)
+            st.image(preview_display_frame, channels="RGB", use_container_width=True)
             st.caption("Draw points, rectangles, or polygons above.")
 
     total_point_count = sum(len(track) for track in tracks)
