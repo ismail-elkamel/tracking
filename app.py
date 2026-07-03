@@ -1133,12 +1133,39 @@ with st.sidebar:
         edge_margin_px = st.slider("Reject points within edge px", 0, 120, 32, 1)
         max_jump_px = st.slider("Reject point jumps over px", 0, 300, 50, 5)
         content_margin_px = st.slider("Reject points near content edge px", 0, 200, 48, 2)
+        motion_residual_px = st.slider(
+            "Reject points off group motion px",
+            0,
+            120,
+            30,
+            5,
+            help="Reject points that do not follow the dominant affine motion of the tracked set.",
+        )
+        min_visible_points = st.slider(
+            "Minimum reliable points",
+            0,
+            20,
+            3,
+            1,
+            help="If a larger point set drops below this count, hide the remaining points instead of trusting a few survivors.",
+        )
+        min_visible_percent = st.slider(
+            "Minimum reliable point %",
+            0,
+            100,
+            15,
+            5,
+            help="If a larger point set drops below this fraction, hide the remaining points for that frame.",
+        )
         track_validation = TrackValidationConfig(
             edge_margin=edge_margin_px,
             max_jump_px=float(max_jump_px),
             content_margin=content_margin_px,
+            motion_residual_px=float(motion_residual_px),
+            min_visible_points=int(min_visible_points),
+            min_visible_fraction=float(min_visible_percent) / 100.0,
         )
-        st.caption("Hides points that stick to frame/content borders or jump too far between frames.")
+        st.caption("Hides points that stick to borders, jump too far, drift away from group motion, or survive alone.")
     default_instrument_onnx_path = Path("instrument_segmentation/runs/instrument_model/best.onnx")
     avoid_instruments = st.checkbox(
         "Avoid instruments with ONNX mask",
