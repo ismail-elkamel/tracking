@@ -1616,9 +1616,10 @@ try:
     preview_column, preview_info_column = st.columns([1, 1], gap="large")
     with preview_column:
         st.subheader("Preview")
+        preview_has_obj_tracks = any(label.startswith("obj ") for label in labels)
         if tracks:
             preview_frame = frame_rgb
-            if obj_overlay_enabled and obj_projected_points is not None:
+            if obj_overlay_enabled and obj_projected_points is not None and not preview_has_obj_tracks:
                 preview_frame = draw_obj_overlay(preview_frame, obj_projected_points, obj_faces, obj_face_colors)
             st.image(draw_tracks(preview_frame, tracks, labels), channels="RGB", use_container_width=True)
             st.caption(
