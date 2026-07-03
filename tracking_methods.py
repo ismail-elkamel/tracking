@@ -970,13 +970,12 @@ def enforce_minimum_visible_points(
     total_points: int,
     config: TrackValidationConfig,
 ) -> np.ndarray:
-    if total_points < 6:
-        return valid_mask
-
     min_points = max(0, int(config.min_visible_points))
     min_fraction_points = int(np.ceil(float(config.min_visible_fraction) * float(total_points)))
     required = max(min_points, min_fraction_points)
     if required <= 0:
+        return valid_mask
+    if total_points < required:
         return valid_mask
     if int(valid_mask.sum()) >= required:
         return valid_mask
