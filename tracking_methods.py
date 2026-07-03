@@ -67,10 +67,12 @@ class ObjOverlayMetadata:
     show_anchor_points: bool = True
     render_style: str = "Wireframe"
     show_pose_text: bool = False
+    pose_smoothing: float = 0.35
 
 
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
 OBJ_PNP_POSE_CACHE: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+OBJ_2D_TRANSFORM_CACHE: dict[str, np.ndarray] = {}
 OBJ_HOMOGRAPHY_ROTATION_CACHE: dict[str, tuple[np.ndarray, str]] = {}
 
 
@@ -111,8 +113,10 @@ def register_obj_overlay(
     show_anchor_points: bool = True,
     render_style: str = "Wireframe",
     show_pose_text: bool = False,
+    pose_smoothing: float = 0.35,
 ) -> None:
     OBJ_PNP_POSE_CACHE.pop(label, None)
+    OBJ_2D_TRANSFORM_CACHE.pop(label, None)
     OBJ_HOMOGRAPHY_ROTATION_CACHE.pop(label, None)
     if face_colors is None:
         face_colors = [(60, 220, 255)] * len(faces)
@@ -134,6 +138,7 @@ def register_obj_overlay(
         show_anchor_points=bool(show_anchor_points),
         render_style=render_style,
         show_pose_text=bool(show_pose_text),
+        pose_smoothing=float(pose_smoothing),
     )
 
 
@@ -340,9 +345,23 @@ def estimate_partial_2d_transform(source: np.ndarray, target: np.ndarray) -> np.
     return transform
 
 
+def valid_correspondence_count(source: np.ndarray, target: np.ndarray) -> int:
+    count = min(len(source), len(target))
+    if count == 0:
+        return 0
+    source = source[:count]
+    target = target[:count]
+    valid = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
+    return int(valid.sum())
+
+
 def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
+        return None
+    count = min(len(metadata.anchor_points), len(tracked_points))
+    required_points = min(3, count)
+    if valid_correspondence_count(metadata.anchor_points, tracked_points) < required_points:
         return None
     return estimate_partial_2d_transform(metadata.anchor_points, tracked_points)
 
@@ -353,6 +372,59 @@ def apply_obj_transform(points: np.ndarray, transform: np.ndarray | None) -> np.
     ones = np.ones((len(points), 1), dtype=np.float32)
     homogeneous = np.hstack([points.astype(np.float32), ones])
     return (homogeneous @ transform.T).astype(np.float32)
+
+
+def obj_pose_smoothing_alpha(metadata: ObjOverlayMetadata) -> float:
+    return float(np.clip(float(metadata.pose_smoothing), 0.0, 1.0))
+
+
+def obj_max_pose_jump_px(metadata: ObjOverlayMetadata) -> float:
+    frame_diag = float(np.hypot(metadata.frame_width, metadata.frame_height))
+    return max(80.0, 0.12 * frame_diag)
+
+
+def transform_update_is_reasonable(
+    metadata: ObjOverlayMetadata,
+    previous: np.ndarray | None,
+    transform: np.ndarray,
+) -> bool:
+    if previous is None:
+        return True
+    if previous.shape != transform.shape:
+        return True
+    previous_points = apply_obj_transform(metadata.anchor_points, previous)
+    current_points = apply_obj_transform(metadata.anchor_points, transform)
+    valid = np.isfinite(previous_points).all(axis=1) & np.isfinite(current_points).all(axis=1)
+    if int(valid.sum()) < 3:
+        return True
+    median_shift = float(np.median(np.linalg.norm(current_points[valid] - previous_points[valid], axis=1)))
+    return median_shift <= obj_max_pose_jump_px(metadata)
+
+
+def update_cached_obj_transform(
+    label: str,
+    metadata: ObjOverlayMetadata,
+    transform: np.ndarray | None,
+) -> np.ndarray | None:
+    cached = OBJ_2D_TRANSFORM_CACHE.get(label)
+    if transform is None or not np.isfinite(transform).all():
+        return cached
+    transform = transform.astype(np.float32)
+    if not transform_update_is_reasonable(metadata, cached, transform):
+        return cached
+    if cached is not None and cached.shape == transform.shape:
+        alpha = obj_pose_smoothing_alpha(metadata)
+        transform = ((1.0 - alpha) * cached + alpha * transform).astype(np.float32)
+    OBJ_2D_TRANSFORM_CACHE[label] = transform.copy()
+    return transform
+
+
+def estimate_cached_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
+    metadata = OBJ_OVERLAYS.get(label)
+    if metadata is None:
+        return None
+    transform = estimate_obj_transform(label, tracked_points)
+    return update_cached_obj_transform(label, metadata, transform)
 
 
 def obj_camera_matrix(metadata: ObjOverlayMetadata) -> np.ndarray:
@@ -385,6 +457,38 @@ def pose_text_from_rotation(rotation: np.ndarray, prefix: str) -> str:
     rx, ry, rz = rotation_matrix_to_euler_xyz(rotation)
     angle = float(np.degrees(np.arccos(np.clip((np.trace(rotation) - 1.0) / 2.0, -1.0, 1.0))))
     return f"{prefix} rx={rx:+.1f} ry={ry:+.1f} rz={rz:+.1f} angle={angle:.1f}"
+
+
+def rotation_delta_degrees(previous: np.ndarray, current: np.ndarray) -> float:
+    delta = current @ previous.T
+    return float(np.degrees(np.arccos(np.clip((np.trace(delta) - 1.0) / 2.0, -1.0, 1.0))))
+
+
+def orthonormalize_rotation(rotation: np.ndarray) -> np.ndarray:
+    u, _, vt = np.linalg.svd(rotation.astype(np.float32))
+    result = (u @ vt).astype(np.float32)
+    if np.linalg.det(result) < 0:
+        u[:, -1] *= -1.0
+        result = (u @ vt).astype(np.float32)
+    return result
+
+
+def update_cached_homography_rotation(
+    label: str,
+    metadata: ObjOverlayMetadata,
+    rotation: np.ndarray,
+) -> tuple[np.ndarray, str]:
+    rotation = orthonormalize_rotation(rotation)
+    cached = OBJ_HOMOGRAPHY_ROTATION_CACHE.get(label)
+    if cached is not None:
+        previous_rotation, previous_text = cached
+        if rotation_delta_degrees(previous_rotation, rotation) > 35.0:
+            return previous_rotation, previous_text
+        alpha = obj_pose_smoothing_alpha(metadata)
+        rotation = orthonormalize_rotation((1.0 - alpha) * previous_rotation + alpha * rotation)
+    text = pose_text_from_rotation(rotation, "H")
+    OBJ_HOMOGRAPHY_ROTATION_CACHE[label] = (rotation.copy(), text)
+    return rotation, text
 
 
 def draw_pose_text(output: np.ndarray, text: str | None) -> np.ndarray:
@@ -479,6 +583,53 @@ def project_obj_points_from_pose(
     return projected.reshape(-1, 2).astype(np.float32)
 
 
+def pnp_pose_update_is_reasonable(
+    label: str,
+    metadata: ObjOverlayMetadata,
+    rvec: np.ndarray,
+    tvec: np.ndarray,
+) -> bool:
+    cached_pose = OBJ_PNP_POSE_CACHE.get(label)
+    if cached_pose is None:
+        return True
+    previous_rvec, previous_tvec = cached_pose
+    previous = project_obj_points_from_pose(
+        metadata,
+        metadata.anchor_points_3d,
+        (previous_rvec, previous_tvec, np.empty(0, dtype=np.int32)),
+    )
+    current = project_obj_points_from_pose(
+        metadata,
+        metadata.anchor_points_3d,
+        (rvec, tvec, np.empty(0, dtype=np.int32)),
+    )
+    valid = np.isfinite(previous).all(axis=1) & np.isfinite(current).all(axis=1)
+    if int(valid.sum()) < 3:
+        return True
+    median_shift = float(np.median(np.linalg.norm(current[valid] - previous[valid], axis=1)))
+    return median_shift <= obj_max_pose_jump_px(metadata)
+
+
+def smooth_cached_obj_pnp_pose(
+    label: str,
+    metadata: ObjOverlayMetadata,
+    rvec: np.ndarray,
+    tvec: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    cached_pose = OBJ_PNP_POSE_CACHE.get(label)
+    rvec = rvec.astype(np.float32)
+    tvec = tvec.astype(np.float32)
+    if cached_pose is None:
+        return rvec.copy(), tvec.copy()
+    previous_rvec, previous_tvec = cached_pose
+    if previous_rvec.shape != rvec.shape or previous_tvec.shape != tvec.shape:
+        return rvec.copy(), tvec.copy()
+    alpha = obj_pose_smoothing_alpha(metadata)
+    smoothed_rvec = ((1.0 - alpha) * previous_rvec + alpha * rvec).astype(np.float32)
+    smoothed_tvec = ((1.0 - alpha) * previous_tvec + alpha * tvec).astype(np.float32)
+    return smoothed_rvec, smoothed_tvec
+
+
 def estimate_cached_obj_pnp_pose(
     label: str,
     metadata: ObjOverlayMetadata,
@@ -487,6 +638,12 @@ def estimate_cached_obj_pnp_pose(
     pose = estimate_obj_pnp_pose(metadata, tracked_points)
     if pose is not None:
         rvec, tvec, inliers = pose
+        if not pnp_pose_update_is_reasonable(label, metadata, rvec, tvec):
+            cached_pose = OBJ_PNP_POSE_CACHE.get(label)
+            if cached_pose is not None:
+                cached_rvec, cached_tvec = cached_pose
+                return cached_rvec, cached_tvec, np.empty(0, dtype=np.int32)
+        rvec, tvec = smooth_cached_obj_pnp_pose(label, metadata, rvec, tvec)
         OBJ_PNP_POSE_CACHE[label] = (rvec.copy(), tvec.copy())
         return rvec, tvec, inliers
 
@@ -501,14 +658,20 @@ def project_obj_with_pnp(label: str, tracked_points: np.ndarray) -> np.ndarray |
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
         return None
-    return project_obj_points_with_pnp(metadata, tracked_points, metadata.model_points_3d)
+    pose = estimate_cached_obj_pnp_pose(label, metadata, tracked_points)
+    if pose is None:
+        return None
+    return project_obj_points_from_pose(metadata, metadata.model_points_3d, pose)
 
 
 def project_obj_anchors_with_pnp(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
         return None
-    return project_obj_points_with_pnp(metadata, tracked_points, metadata.anchor_points_3d)
+    pose = estimate_cached_obj_pnp_pose(label, metadata, tracked_points)
+    if pose is None:
+        return None
+    return project_obj_points_from_pose(metadata, metadata.anchor_points_3d, pose)
 
 
 def estimate_obj_homography_rotation(
@@ -517,55 +680,55 @@ def estimate_obj_homography_rotation(
     tracked_points: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, str] | None:
     count = min(len(metadata.anchor_points), len(tracked_points))
-    if count < 4:
-        return None
-
     source = metadata.anchor_points[:count].astype(np.float32)
     target = tracked_points[:count].astype(np.float32)
-    valid = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
-    source = source[valid]
-    target = target[valid]
+    if count > 0:
+        valid = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
+        source = source[valid]
+        target = target[valid]
+
+    cached_rotation = OBJ_HOMOGRAPHY_ROTATION_CACHE.get(label)
     if len(source) < 4:
-        return None
-
-    homography, inliers = cv2.findHomography(
-        source,
-        target,
-        cv2.RANSAC,
-        max(3.0, float(metadata.pnp_reprojection_error)),
-    )
-    if homography is None or not np.isfinite(homography).all():
-        cached = OBJ_HOMOGRAPHY_ROTATION_CACHE.get(label)
-        if cached is None:
+        if cached_rotation is None:
             return None
-        rotation, text = cached
+        rotation, text = cached_rotation
     else:
-        try:
-            _, rotations, _, _ = cv2.decomposeHomographyMat(
-                homography.astype(np.float64),
-                obj_camera_matrix(metadata).astype(np.float64),
-            )
-        except cv2.error:
-            rotations = []
-        if not rotations:
-            cached = OBJ_HOMOGRAPHY_ROTATION_CACHE.get(label)
-            if cached is None:
+        homography, inliers = cv2.findHomography(
+            source,
+            target,
+            cv2.RANSAC,
+            max(3.0, float(metadata.pnp_reprojection_error)),
+        )
+        if homography is None or not np.isfinite(homography).all():
+            if cached_rotation is None:
                 return None
-            rotation, text = cached
+            rotation, text = cached_rotation
         else:
-            valid_rotations = [rotation for rotation in rotations if np.linalg.det(rotation) > 0]
-            if not valid_rotations:
-                valid_rotations = list(rotations)
-            rotation = min(
-                valid_rotations,
-                key=lambda candidate: abs(
-                    float(np.arccos(np.clip((np.trace(candidate) - 1.0) / 2.0, -1.0, 1.0)))
-                ),
-            ).astype(np.float32)
-            text = pose_text_from_rotation(rotation, "H")
-            OBJ_HOMOGRAPHY_ROTATION_CACHE[label] = (rotation.copy(), text)
+            try:
+                _, rotations, _, _ = cv2.decomposeHomographyMat(
+                    homography.astype(np.float64),
+                    obj_camera_matrix(metadata).astype(np.float64),
+                )
+            except cv2.error:
+                rotations = []
+            if not rotations:
+                if cached_rotation is None:
+                    return None
+                rotation, text = cached_rotation
+            else:
+                valid_rotations = [rotation for rotation in rotations if np.linalg.det(rotation) > 0]
+                if not valid_rotations:
+                    valid_rotations = list(rotations)
+                rotation = min(
+                    valid_rotations,
+                    key=lambda candidate: abs(
+                        float(np.arccos(np.clip((np.trace(candidate) - 1.0) / 2.0, -1.0, 1.0)))
+                    ),
+                ).astype(np.float32)
+                rotation, text = update_cached_homography_rotation(label, metadata, rotation)
 
-    transform = estimate_partial_2d_transform(source, target)
+    transform = estimate_partial_2d_transform(source, target) if len(source) >= 3 else None
+    transform = update_cached_obj_transform(label, metadata, transform)
     center = np.mean(metadata.model_points, axis=0).astype(np.float32)
     if transform is not None:
         center = apply_obj_transform(center[None], transform)[0]
@@ -602,7 +765,7 @@ def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.nda
         projected = estimate_obj_homography_rotation(label, metadata, tracked_points)
         if projected is not None:
             return projected[0]
-    transform = estimate_obj_transform(label, tracked_points)
+    transform = estimate_cached_obj_transform(label, tracked_points)
     return apply_obj_transform(metadata.model_points, transform)
 
 
@@ -642,7 +805,7 @@ def draw_obj_mesh(
                 rotation, _ = cv2.Rodrigues(pose[0])
                 pose_text = pose_text_from_rotation(rotation, "PnP")
         else:
-            transform = estimate_obj_transform(label, tracked_points)
+            transform = estimate_cached_obj_transform(label, tracked_points)
             points = apply_obj_transform(metadata.model_points, transform)
             anchor_points = apply_obj_transform(metadata.anchor_points, transform)
     elif metadata is not None and metadata.transform_mode == "Camera rotation (homography)":
@@ -652,11 +815,11 @@ def draw_obj_mesh(
             if not metadata.show_pose_text:
                 pose_text = None
         else:
-            transform = estimate_obj_transform(label, tracked_points)
+            transform = estimate_cached_obj_transform(label, tracked_points)
             points = apply_obj_transform(metadata.model_points, transform)
             anchor_points = apply_obj_transform(metadata.anchor_points, transform)
     else:
-        transform = estimate_obj_transform(label, tracked_points)
+        transform = estimate_cached_obj_transform(label, tracked_points)
         points = apply_obj_transform(metadata.model_points, transform) if metadata is not None else tracked_points
         anchor_points = apply_obj_transform(metadata.anchor_points, transform) if metadata is not None else tracked_points
     faces = metadata.faces if metadata is not None else []
