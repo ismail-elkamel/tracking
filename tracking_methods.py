@@ -66,6 +66,7 @@ class ObjOverlayMetadata:
 
 
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
+OBJ_PNP_POSE_CACHE: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
 
 def obj_edges_from_faces(
@@ -105,6 +106,7 @@ def register_obj_overlay(
     show_anchor_points: bool = True,
     render_style: str = "Wireframe",
 ) -> None:
+    OBJ_PNP_POSE_CACHE.pop(label, None)
     if face_colors is None:
         face_colors = [(60, 220, 255)] * len(faces)
     edges, edge_colors = obj_edges_from_faces(faces, face_colors)
@@ -390,6 +392,14 @@ def project_obj_points_with_pnp(
     pose = estimate_obj_pnp_pose(metadata, tracked_points)
     if pose is None:
         return None
+    return project_obj_points_from_pose(metadata, object_points, pose)
+
+
+def project_obj_points_from_pose(
+    metadata: ObjOverlayMetadata,
+    object_points: np.ndarray,
+    pose: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> np.ndarray:
     rvec, tvec, _ = pose
     projected, _ = cv2.projectPoints(
         object_points.astype(np.float32),
@@ -399,6 +409,24 @@ def project_obj_points_with_pnp(
         np.zeros((4, 1), dtype=np.float32),
     )
     return projected.reshape(-1, 2).astype(np.float32)
+
+
+def estimate_cached_obj_pnp_pose(
+    label: str,
+    metadata: ObjOverlayMetadata,
+    tracked_points: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    pose = estimate_obj_pnp_pose(metadata, tracked_points)
+    if pose is not None:
+        rvec, tvec, inliers = pose
+        OBJ_PNP_POSE_CACHE[label] = (rvec.copy(), tvec.copy())
+        return rvec, tvec, inliers
+
+    cached_pose = OBJ_PNP_POSE_CACHE.get(label)
+    if cached_pose is None:
+        return None
+    rvec, tvec = cached_pose
+    return rvec, tvec, np.empty(0, dtype=np.int32)
 
 
 def project_obj_with_pnp(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
@@ -454,9 +482,11 @@ def draw_obj_mesh(
     base_frame = output.copy()
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is not None and metadata.transform_mode == "PnP":
-        points = project_obj_with_pnp(label, tracked_points)
-        anchor_points = project_obj_anchors_with_pnp(label, tracked_points)
-        if points is None or anchor_points is None:
+        pose = estimate_cached_obj_pnp_pose(label, metadata, tracked_points)
+        if pose is not None:
+            points = project_obj_points_from_pose(metadata, metadata.model_points_3d, pose)
+            anchor_points = project_obj_points_from_pose(metadata, metadata.anchor_points_3d, pose)
+        else:
             transform = estimate_obj_transform(label, tracked_points)
             points = apply_obj_transform(metadata.model_points, transform)
             anchor_points = apply_obj_transform(metadata.anchor_points, transform)
