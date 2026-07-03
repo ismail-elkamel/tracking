@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import csv
 import hashlib
+import io
 import importlib
 import math
 import shutil
@@ -362,15 +364,117 @@ def obj_edges_from_faces(faces: list[list[int]]) -> list[tuple[int, int]]:
     return sorted(edges)
 
 
+def obj_control_image(
+    points_xy: np.ndarray,
+    faces: list[list[int]],
+    face_colors: list[tuple[int, int, int]] | None,
+    canvas_width: int,
+    canvas_height: int,
+    padding: int = 12,
+) -> tuple[str, tuple[float, float], tuple[int, int]] | None:
+    if len(points_xy) == 0:
+        return None
+
+    finite = np.isfinite(points_xy).all(axis=1)
+    if not bool(finite.any()):
+        return None
+    valid_points = points_xy[finite]
+    min_xy = np.floor(valid_points.min(axis=0) - padding).astype(int)
+    max_xy = np.ceil(valid_points.max(axis=0) + padding).astype(int)
+    min_xy = np.maximum(min_xy, [-canvas_width, -canvas_height])
+    max_xy = np.minimum(max_xy, [canvas_width * 2, canvas_height * 2])
+    image_width = int(max(8, max_xy[0] - min_xy[0]))
+    image_height = int(max(8, max_xy[1] - min_xy[1]))
+
+    rgba = np.zeros((image_height, image_width, 4), dtype=np.uint8)
+    shifted_points = points_xy - min_xy.astype(np.float32)
+    edges = obj_edges_from_faces(faces)
+    if edges:
+        edge_colors = [(60, 220, 255)] * len(edges)
+        if face_colors:
+            color_by_edge: dict[tuple[int, int], tuple[int, int, int]] = {}
+            for face_index, face in enumerate(faces):
+                face_color = face_colors[face_index] if face_index < len(face_colors) else (60, 220, 255)
+                for start, end in zip(face, face[1:] + face[:1]):
+                    if start == end:
+                        continue
+                    edge = (start, end) if start < end else (end, start)
+                    color_by_edge.setdefault(edge, face_color)
+            edge_colors = [color_by_edge.get(edge, (60, 220, 255)) for edge in edges]
+
+        max_edges = 2500
+        if len(edges) > max_edges:
+            selected = np.linspace(0, len(edges) - 1, max_edges, dtype=np.int32)
+            edges = [edges[int(index)] for index in selected]
+            edge_colors = [edge_colors[int(index)] for index in selected]
+
+        for edge_index, (start, end) in enumerate(edges):
+            if start < 0 or end < 0 or start >= len(shifted_points) or end >= len(shifted_points):
+                continue
+            p1 = np.round(shifted_points[start]).astype(np.int32)
+            p2 = np.round(shifted_points[end]).astype(np.int32)
+            color = edge_colors[edge_index] if edge_index < len(edge_colors) else (60, 220, 255)
+            cv2.line(rgba, tuple(p1), tuple(p2), (*color, 230), 1, lineType=cv2.LINE_AA)
+    else:
+        pts = np.round(shifted_points).astype(np.int32)
+        for point in pts[:: max(1, len(pts) // 1200)]:
+            cv2.circle(rgba, tuple(point), 1, (60, 220, 255, 230), -1, lineType=cv2.LINE_AA)
+
+    alpha = rgba[:, :, 3]
+    if int(alpha.max()) == 0:
+        return None
+    png = Image.fromarray(rgba, mode="RGBA")
+    buffer = io.BytesIO()
+    png.save(buffer, format="PNG")
+    data_url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    return data_url, (float(min_xy[0]), float(min_xy[1])), (image_width, image_height)
+
+
 def obj_control_model_drawing(
     width: int,
     height: int,
     points_xy: np.ndarray,
     faces: list[list[int]],
+    face_colors: list[tuple[int, int, int]] | None = None,
     max_segments: int = 1200,
 ) -> dict[str, Any]:
     if len(points_xy) == 0:
         return obj_control_box_drawing(width, height)
+
+    image_payload = obj_control_image(points_xy, faces, face_colors, width, height)
+    if image_payload is not None:
+        image_src, (left, top), (image_width, image_height) = image_payload
+        return {
+            "version": "4.4.0",
+            "objects": [
+                {
+                    "type": "image",
+                    "version": "4.4.0",
+                    "originX": "left",
+                    "originY": "top",
+                    "left": left,
+                    "top": top,
+                    "width": image_width,
+                    "height": image_height,
+                    "scaleX": 1,
+                    "scaleY": 1,
+                    "src": image_src,
+                    "crossOrigin": "anonymous",
+                    "opacity": 1.0,
+                    "selectable": True,
+                    "evented": True,
+                    "transparentCorners": False,
+                    "cornerColor": "#ffff42",
+                    "cornerStrokeColor": "#111111",
+                    "borderColor": "#ffff42",
+                    "lockRotation": True,
+                    "lockScalingFlip": True,
+                    "lockUniScaling": True,
+                    "hasRotatingPoint": False,
+                    "objectCaching": False,
+                }
+            ],
+        }
 
     edges = obj_edges_from_faces(faces)
     if len(edges) > max_segments:
@@ -554,20 +658,27 @@ def obj_placement_from_canvas(
     frame_width: int,
     frame_height: int,
     model_extent: float | None = None,
+    base_scale_px: float | None = None,
 ) -> tuple[float, float, float]:
     default_scale = max(40.0, min(frame_width, frame_height) / 4.0)
     if not json_data:
         return frame_width / 2.0, frame_height / 2.0, default_scale
     for obj in json_data.get("objects", []):
         obj_type = obj.get("type")
-        if obj_type == "rect":
+        if obj_type in {"rect", "image"}:
             left = float(obj.get("left", 0.0))
             top = float(obj.get("top", 0.0))
-            width = float(obj.get("width", 0.0)) * float(obj.get("scaleX", 1.0))
-            height = float(obj.get("height", 0.0)) * float(obj.get("scaleY", 1.0))
+            scale_x = float(obj.get("scaleX", 1.0))
+            scale_y = float(obj.get("scaleY", 1.0))
+            width = float(obj.get("width", 0.0)) * scale_x
+            height = float(obj.get("height", 0.0)) * scale_y
             center_x = (left + width / 2.0) / canvas_scale
             center_y = (top + height / 2.0) / canvas_scale
-            scale_px = max(10.0, max(width, height) / (2.0 * canvas_scale))
+            if obj_type == "image":
+                scale_px = float(base_scale_px or default_scale) * max(scale_x, scale_y)
+                scale_px = max(10.0, scale_px)
+            else:
+                scale_px = max(10.0, max(width, height) / (2.0 * canvas_scale))
             return center_x, center_y, scale_px
         if obj_type in {"path", "polygon"}:
             points = fabric_points(obj)
@@ -1628,6 +1739,7 @@ try:
                     placement_height,
                     placement_model_points,
                     obj_faces,
+                    obj_face_colors,
                 ),
                 display_toolbar=False,
                 key=f"obj_placement_{video_path.name}_{frame_index}_{obj_upload_key}_{placement_rotation_key}",
@@ -1638,6 +1750,7 @@ try:
                 frame_width,
                 frame_height,
                 model_extent=model_extent_xy,
+                base_scale_px=obj_scale,
             )
             st.session_state[placement_state_key] = {
                 "center_x": obj_center_x,
