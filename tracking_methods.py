@@ -295,6 +295,14 @@ def estimate_partial_2d_transform(source: np.ndarray, target: np.ndarray) -> np.
     if len(source) < 1 or len(target) < 1:
         return None
     count = min(len(source), len(target))
+    source = source[:count]
+    target = target[:count]
+    finite = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
+    source = source[finite]
+    target = target[finite]
+    count = len(source)
+    if count < 1:
+        return None
     if count == 1:
         dx, dy = (target[0] - source[0]).astype(float)
         return np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
@@ -959,11 +967,48 @@ def regroup_visible_points(
         group_visible = visible_points[offset : offset + size]
         label = labels[index] if labels and index < len(labels) else ""
         if label.startswith("obj "):
-            grouped.append(group.astype(np.float32))
+            obj_group = group.astype(np.float32, copy=True)
+            obj_group[~group_visible] = np.nan
+            grouped.append(obj_group)
         else:
             grouped.append(group[group_visible].astype(np.float32))
         offset += size
     return grouped
+
+
+def visibility_mask_for_frame(
+    visibility: np.ndarray | None,
+    frame_index: int,
+    point_count: int,
+) -> np.ndarray:
+    if visibility is None:
+        return np.ones(point_count, dtype=bool)
+
+    array = np.asarray(visibility)
+    if array.size == 0:
+        return np.ones(point_count, dtype=bool)
+    if array.ndim >= 1 and array.shape[-1] == 1:
+        array = np.squeeze(array, axis=-1)
+
+    if array.ndim == 1:
+        mask = array
+    else:
+        if frame_index < 0:
+            frame_index = array.shape[0] + frame_index
+        frame_index = int(np.clip(frame_index, 0, array.shape[0] - 1))
+        mask = array[frame_index]
+
+    mask = np.asarray(mask).reshape(-1)
+    if mask.dtype == np.bool_:
+        mask = mask.astype(bool, copy=False)
+    else:
+        mask = mask.astype(np.float32, copy=False) > 0.5
+    if len(mask) >= point_count:
+        return mask[:point_count]
+
+    padded = np.zeros(point_count, dtype=bool)
+    padded[: len(mask)] = mask
+    return padded
 
 
 def resize_for_model(frame_rgb: np.ndarray, max_side: int) -> tuple[np.ndarray, float]:
@@ -1343,10 +1388,10 @@ def track_with_cotracker3_online(
         with torch.inference_mode():
             try:
                 kwargs["add_support_grid"] = True
-                pred_tracks, _ = model(**kwargs)
+                pred_tracks, pred_visibility = model(**kwargs)
             except TypeError:
                 kwargs.pop("add_support_grid", None)
-                pred_tracks, _ = model(**kwargs)
+                pred_tracks, pred_visibility = model(**kwargs)
 
         last_processed_frame = chunk[-1][0]
         if is_first_step:
@@ -1356,6 +1401,9 @@ def track_with_cotracker3_online(
             return
 
         predicted = pred_tracks[0].detach().cpu().numpy()
+        visibility = None
+        if pred_visibility is not None:
+            visibility = pred_visibility[0].detach().cpu().numpy()
         for local_index, (absolute_frame, _, original_rgb) in enumerate(chunk):
             if absolute_frame <= last_displayed_frame:
                 continue
@@ -1366,7 +1414,8 @@ def track_with_cotracker3_online(
             instrument_mask = None
             if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                 instrument_mask = predict_instrument_mask(original_rgb, instrument_avoidance)
-                valid_mask = points_outside_instrument(points, instrument_mask)
+                valid_mask = visibility_mask_for_frame(visibility, predicted_index, len(points))
+                valid_mask &= points_outside_instrument(points, instrument_mask)
                 valid_mask = validate_tracked_points(
                     points,
                     last_valid_points,
@@ -1565,7 +1614,7 @@ def track_with_cotracker3_offline(
             predicted = pred_tracks[0].detach().cpu().numpy() / model_scale
             visibility = None
             if pred_visibility is not None:
-                visibility = pred_visibility[0].detach().cpu().numpy().astype(bool)
+                visibility = pred_visibility[0].detach().cpu().numpy()
             del video_tensor, queries, pred_tracks, pred_visibility
             if device.type == "cuda":
                 torch.cuda.empty_cache()
@@ -1574,7 +1623,7 @@ def track_with_cotracker3_offline(
                 points = predicted[relative_frame]
                 instrument_mask = None
                 if freeze_lost or instrument_avoidance is not None or track_validation is not None:
-                    valid_mask = visibility[relative_frame] if visibility is not None else np.ones(len(points), dtype=bool)
+                    valid_mask = visibility_mask_for_frame(visibility, relative_frame, len(points))
                     if instrument_avoidance is not None:
                         instrument_mask = predict_instrument_mask(frame_rgb, instrument_avoidance)
                         valid_mask = valid_mask & points_outside_instrument(points, instrument_mask)
@@ -1688,12 +1737,16 @@ def track_with_litetracker(
                     .to(device=device, dtype=torch.float32)
                     .permute(2, 0, 1)[None]
                 )
-                coords, _, _ = model(frame_tensor, queries=queries)
+                coords, predicted_visibility, _ = model(frame_tensor, queries=queries)
                 points = coords[0, -1].detach().cpu().numpy() / model_scale
+                visibility = None
+                if predicted_visibility is not None:
+                    visibility = predicted_visibility[0].detach().cpu().numpy()
                 instrument_mask = None
                 if freeze_lost or instrument_avoidance is not None or track_validation is not None:
                     instrument_mask = predict_instrument_mask(frame_rgb, instrument_avoidance)
-                    valid_mask = points_outside_instrument(points, instrument_mask)
+                    valid_mask = visibility_mask_for_frame(visibility, -1, len(points))
+                    valid_mask &= points_outside_instrument(points, instrument_mask)
                     valid_mask = validate_tracked_points(
                         points,
                         last_valid_points,
