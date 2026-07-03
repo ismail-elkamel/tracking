@@ -1330,6 +1330,7 @@ try:
     obj_pnp_reprojection_error = 8.0
     obj_pnp_min_inliers = 6
     obj_show_anchor_points = False
+    obj_show_pose_text = False
     obj_render_style = "Wireframe"
     obj_rotate_x = 0
     obj_rotate_y = 0
@@ -1436,32 +1437,45 @@ try:
                     st.caption("Use the placement panel below to rotate the model and move/resize the blue box.")
                 obj_transform_mode = st.selectbox(
                     "3D overlay transform",
-                    ["Locked 2D placement", "PnP", "Similarity"],
+                    ["Locked 2D placement", "PnP", "Camera rotation (homography)", "Similarity"],
                     help=(
                         "Locked keeps your initial OBJ placement and moves it from tracked anchors. "
-                        "PnP re-estimates a 3D pose from anchors and can change the placement."
+                        "PnP re-estimates a full 3D pose. Camera rotation estimates a homography "
+                        "from the tracked plane and rotates the complete 3D model with it."
                     ),
                 )
-                if obj_transform_mode == "PnP":
+                if obj_transform_mode in {"PnP", "Camera rotation (homography)"}:
                     pnp_a, pnp_b = st.columns(2)
                     with pnp_a:
                         obj_pnp_reprojection_error = st.slider(
-                            "PnP reprojection error px",
+                            "Pose reprojection error px",
                             2.0,
                             30.0,
                             8.0,
                             0.5,
                             help="Higher values accept noisier tracked anchors. Lower values reject bad anchors more aggressively.",
                         )
-                    with pnp_b:
-                        obj_pnp_min_inliers = st.slider(
-                            "PnP min inliers",
-                            6,
-                            200,
-                            6,
-                            1,
-                            help="Minimum good anchors required before accepting the PnP pose.",
+                    if obj_transform_mode == "PnP":
+                        with pnp_b:
+                            obj_pnp_min_inliers = st.slider(
+                                "PnP min inliers",
+                                6,
+                                200,
+                                6,
+                                1,
+                                help="Minimum good anchors required before accepting the PnP pose.",
+                            )
+                    else:
+                        with pnp_b:
+                            st.info("Homography rotation needs at least 4 well-spread points on the same visible plane.")
+                    obj_show_pose_text = st.checkbox(
+                        "Show detected rotation text",
+                        value=True,
+                        help=(
+                            "Draws rx/ry/rz and total angle in the output video so you can see "
+                            "the rotation estimated from tracked anchors."
                         )
+                    )
                 obj_anchor_source = st.selectbox(
                     "3D anchor source",
                     ["Manual points on model", "Auto sampled OBJ points"],
@@ -1602,6 +1616,11 @@ try:
                     f"PnP needs at least {max(6, obj_pnp_min_inliers)} accepted manual model points. "
                     "With fewer points, the app uses the 2D fallback."
                 )
+            elif obj_transform_mode == "Camera rotation (homography)" and len(obj_tracks[0]) < 4:
+                st.warning(
+                    "Camera rotation needs at least 4 accepted manual model points on the same visible plane. "
+                    "With fewer points, the app uses the 2D fallback."
+                )
         else:
             obj_tracks, obj_labels, obj_anchor_indices = obj_tracks_from_projection(
                 obj_projected_points,
@@ -1627,6 +1646,7 @@ try:
                 pnp_min_inliers=obj_pnp_min_inliers,
                 show_anchor_points=obj_show_anchor_points,
                 render_style=obj_render_style,
+                show_pose_text=obj_show_pose_text,
             )
         tracks.extend(obj_tracks)
         labels.extend(obj_labels)
