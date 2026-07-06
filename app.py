@@ -42,6 +42,7 @@ from tracking_methods import (
     draw_tracks,
     external_tracker_is_available,
     external_tracker_setup_instructions,
+    onnxruntime_available_providers,
     run_external_tracker,
     track_with_cotracker3_offline,
     track_with_cotracker3_online,
@@ -1065,9 +1066,9 @@ def run_tracker_model(
 st.set_page_config(page_title="Surgical Video Tracker", layout="wide")
 st.title("Surgical Video Tracker")
 
-if st.session_state.get("model_cache_version") != "instrument_avoidance_v1":
+if st.session_state.get("model_cache_version") != "instrument_avoidance_v2":
     st.cache_resource.clear()
-    st.session_state["model_cache_version"] = "instrument_avoidance_v1"
+    st.session_state["model_cache_version"] = "instrument_avoidance_v2"
 
 with st.sidebar:
     uploaded = st.file_uploader("Video", type=["mp4", "mov", "avi", "mkv"])
@@ -1098,7 +1099,7 @@ with st.sidebar:
         grid_spacing = st.slider("Grid spacing", 8, 200, preset_spacing, 8)
         grid_margin = st.slider("Grid margin", 0, 160, 48, 4)
         grid_max_points = st.slider("Max grid points", 10, 500, preset_max_points, 10)
-    enable_gpu_local_neural = st.checkbox("Use GPU for CoTracker/LiteTracker", value=False)
+    enable_gpu_local_neural = st.checkbox("Use GPU for CoTracker/LiteTracker", value=cuda_is_available())
     st.divider()
     unavailable_trackers = [
         tracker
@@ -1153,11 +1154,25 @@ with st.sidebar:
         instrument_mask_size = st.slider("Instrument mask model size", 128, 1024, 512, 64)
         instrument_threshold = st.slider("Instrument mask threshold", 0.05, 0.95, 0.35, 0.05)
         instrument_dilation = st.slider("Instrument avoid margin px", 0, 60, 15, 1)
+        instrument_use_gpu = st.checkbox("Use GPU for instrument ONNX", value=cuda_is_available())
+        instrument_device_name = CUDA_DEVICE if instrument_use_gpu else CPU_DEVICE
+        try:
+            available_onnx_providers = onnxruntime_available_providers()
+            if instrument_use_gpu and "CUDAExecutionProvider" not in available_onnx_providers:
+                st.warning(
+                    "Instrument ONNX cannot use GPU because ONNXRuntime has no CUDAExecutionProvider. "
+                    f"Available providers: {available_onnx_providers}."
+                )
+            else:
+                st.caption(f"Instrument ONNX providers: {available_onnx_providers}")
+        except RuntimeError as error:
+            st.warning(str(error))
         instrument_avoidance = InstrumentAvoidanceConfig(
             onnx_path=instrument_onnx_path,
             image_size=instrument_mask_size,
             threshold=instrument_threshold,
             dilation=instrument_dilation,
+            device_name=instrument_device_name,
         )
         st.caption(
             "Applies to OpenCV, CoTracker, and LiteTracker. Points on the instrument mask are hidden, "
