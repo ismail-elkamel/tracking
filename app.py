@@ -1392,6 +1392,7 @@ try:
     obj_render_style = "Wireframe"
     obj_motion_smoothing = 0.75
     obj_motion_min_inlier_ratio = 0.35
+    obj_motion_strong_inlier_ratio = 0.70
     obj_motion_max_jump_px = 35.0
     obj_motion_max_scale_change = 0.12
     obj_motion_max_rotation_deg = 8.0
@@ -1500,10 +1501,9 @@ try:
                     st.caption("Use the placement panel below to rotate the model and move/resize the blue box.")
                 obj_transform_mode = st.selectbox(
                     "3D overlay transform",
-                    ["Stabilized similarity", "Frozen placement", "Locked 2D placement", "Similarity", "PnP"],
+                    ["Stabilized similarity", "Locked 2D placement", "Similarity", "PnP"],
                     help=(
                         "Stabilized similarity follows only coherent global camera/model motion. "
-                        "Frozen placement keeps the model exactly where you placed it. "
                         "Locked keeps your initial OBJ placement and moves it from tracked anchors. "
                         "PnP re-estimates a 3D pose from anchors and can change the placement."
                     ),
@@ -1539,6 +1539,14 @@ try:
                             0.05,
                             help="Rejects updates when too few OBJ anchors agree.",
                         )
+                        obj_motion_strong_inlier_ratio = st.slider(
+                            "Strong motion inlier ratio",
+                            0.0,
+                            1.0,
+                            0.70,
+                            0.05,
+                            help="Allows large camera/model motion when this many anchors agree.",
+                        )
                         obj_motion_max_scale_change = st.slider(
                             "Max scale change/frame",
                             0.01,
@@ -1554,11 +1562,6 @@ try:
                         8.0,
                         1.0,
                         help="Rejects sudden in-plane rotation from noisy points.",
-                    )
-                elif obj_transform_mode == "Frozen placement":
-                    st.caption(
-                        "The 3D model will stay fixed at the initial placement for the whole output video. "
-                        "Use this when the camera is stable or tracking noise makes the overlay drift."
                     )
                 if obj_transform_mode == "PnP":
                     pnp_a, pnp_b = st.columns(2)
@@ -1747,6 +1750,7 @@ try:
                 render_style=obj_render_style,
                 motion_smoothing=obj_motion_smoothing,
                 motion_min_inlier_ratio=obj_motion_min_inlier_ratio,
+                motion_strong_inlier_ratio=obj_motion_strong_inlier_ratio,
                 motion_max_jump_px=obj_motion_max_jump_px,
                 motion_max_scale_change=obj_motion_max_scale_change,
                 motion_max_rotation_deg=obj_motion_max_rotation_deg,

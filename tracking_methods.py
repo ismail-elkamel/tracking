@@ -71,6 +71,7 @@ class ObjOverlayMetadata:
     render_style: str = "Wireframe"
     motion_smoothing: float = 0.75
     motion_min_inlier_ratio: float = 0.35
+    motion_strong_inlier_ratio: float = 0.70
     motion_max_jump_px: float = 35.0
     motion_max_scale_change: float = 0.12
     motion_max_rotation_deg: float = 8.0
@@ -119,6 +120,7 @@ def register_obj_overlay(
     render_style: str = "Wireframe",
     motion_smoothing: float = 0.75,
     motion_min_inlier_ratio: float = 0.35,
+    motion_strong_inlier_ratio: float = 0.70,
     motion_max_jump_px: float = 35.0,
     motion_max_scale_change: float = 0.12,
     motion_max_rotation_deg: float = 8.0,
@@ -146,6 +148,7 @@ def register_obj_overlay(
         render_style=render_style,
         motion_smoothing=float(motion_smoothing),
         motion_min_inlier_ratio=float(motion_min_inlier_ratio),
+        motion_strong_inlier_ratio=float(motion_strong_inlier_ratio),
         motion_max_jump_px=float(motion_max_jump_px),
         motion_max_scale_change=float(motion_max_scale_change),
         motion_max_rotation_deg=float(motion_max_rotation_deg),
@@ -491,8 +494,10 @@ def estimate_stabilized_obj_transform(label: str, tracked_points: np.ndarray) ->
     if transform is None or not np.isfinite(transform).all():
         return cached_transform.copy() if cached_transform is not None else None
 
+    inlier_ratio = inlier_count / max(valid_count, 1)
     min_ratio = float(np.clip(metadata.motion_min_inlier_ratio, 0.0, 1.0))
-    if valid_count >= 6 and inlier_count / max(valid_count, 1) < min_ratio:
+    strong_ratio = float(np.clip(metadata.motion_strong_inlier_ratio, min_ratio, 1.0))
+    if valid_count >= 6 and inlier_ratio < min_ratio:
         return cached_transform.copy() if cached_transform is not None else transform.astype(np.float32)
 
     if cached_transform is None:
@@ -508,14 +513,17 @@ def estimate_stabilized_obj_transform(label: str, tracked_points: np.ndarray) ->
     scale_change = abs(current_scale / max(previous_scale, 1e-6) - 1.0)
     rotation_change = abs(angle_delta_deg(current_angle, previous_angle))
 
-    if (
+    update_is_large = (
         center_jump > float(metadata.motion_max_jump_px)
         or scale_change > float(metadata.motion_max_scale_change)
         or rotation_change > float(metadata.motion_max_rotation_deg)
-    ):
+    )
+    if update_is_large and inlier_ratio < strong_ratio:
         return cached_transform.copy()
 
     smoothing = float(np.clip(metadata.motion_smoothing, 0.0, 0.98))
+    if update_is_large:
+        smoothing = min(smoothing, 0.45)
     smoothed = (cached_transform * smoothing + transform.astype(np.float32) * (1.0 - smoothing)).astype(np.float32)
     OBJ_2D_TRANSFORM_CACHE[label] = smoothed.copy()
     return smoothed
@@ -641,8 +649,6 @@ def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.nda
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
         return tracked_points
-    if metadata.transform_mode == "Frozen placement":
-        return metadata.model_points.astype(np.float32)
     if metadata.transform_mode == "Stabilized similarity":
         transform = estimate_stabilized_obj_transform(label, tracked_points)
         return apply_obj_transform(metadata.model_points, transform)
@@ -680,10 +686,7 @@ def draw_obj_mesh(
 ) -> np.ndarray:
     base_frame = output.copy()
     metadata = OBJ_OVERLAYS.get(label)
-    if metadata is not None and metadata.transform_mode == "Frozen placement":
-        points = metadata.model_points.astype(np.float32)
-        anchor_points = metadata.anchor_points.astype(np.float32)
-    elif metadata is not None and metadata.transform_mode == "Stabilized similarity":
+    if metadata is not None and metadata.transform_mode == "Stabilized similarity":
         transform = estimate_stabilized_obj_transform(label, tracked_points)
         points = apply_obj_transform(metadata.model_points, transform)
         anchor_points = apply_obj_transform(metadata.anchor_points, transform)
