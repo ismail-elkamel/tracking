@@ -21,6 +21,7 @@ import tracking_methods as _tracking_methods
 
 importlib.reload(_tracking_methods)
 from tracking_methods import (
+    BOOTSTAPIR_TRACKER,
     COTRACKER_OFFLINE_TRACKER,
     COTRACKER_TRACKER,
     CPU_DEVICE,
@@ -38,12 +39,15 @@ from tracking_methods import (
     cuda_summary,
     default_external_command,
     default_litetracker_weights_path,
+    default_tapir_weights_path,
     download_litetracker_weights,
+    download_tapir_weights,
     draw_tracks,
     external_tracker_is_available,
     external_tracker_setup_instructions,
     onnxruntime_available_providers,
     run_external_tracker,
+    TAPIR_TRACKER,
     track_with_cotracker3_offline,
     track_with_cotracker3_online,
     track_with_litetracker,
@@ -90,6 +94,8 @@ TRACKER_OPTIONS = [
     COTRACKER_TRACKER,
     COTRACKER_OFFLINE_TRACKER,
     LITETRACKER_TRACKER,
+    TAPIR_TRACKER,
+    BOOTSTAPIR_TRACKER,
     SAM2_TRACKER,
     SURGISAM2_TRACKER,
     SAM3_TRACKER,
@@ -1047,12 +1053,20 @@ def run_tracker_model(
             instrument_avoidance,
             track_validation,
         )
-    if tracker_name in {SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER}:
+    if tracker_name in {
+        TAPIR_TRACKER,
+        BOOTSTAPIR_TRACKER,
+        SAM2_TRACKER,
+        SURGISAM2_TRACKER,
+        SAM3_TRACKER,
+        MEDSAM2_TRACKER,
+    }:
         return run_external_tracker(
             tracker_name,
             external_commands.get(tracker_name, default_external_command(tracker_name)),
             video_path,
             start_frame,
+            end_frame,
             tracks,
             labels,
             result_path,
@@ -1104,7 +1118,15 @@ with st.sidebar:
     unavailable_trackers = [
         tracker
         for tracker in TRACKER_OPTIONS
-        if tracker in {SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER}
+        if tracker
+        in {
+            TAPIR_TRACKER,
+            BOOTSTAPIR_TRACKER,
+            SAM2_TRACKER,
+            SURGISAM2_TRACKER,
+            SAM3_TRACKER,
+            MEDSAM2_TRACKER,
+        }
         and not external_tracker_is_available(tracker)
     ]
     tracker_options = [tracker for tracker in TRACKER_OPTIONS if tracker not in unavailable_trackers]
@@ -1189,6 +1211,8 @@ with st.sidebar:
             SURGISAM2_TRACKER,
             SAM3_TRACKER,
             MEDSAM2_TRACKER,
+            TAPIR_TRACKER,
+            BOOTSTAPIR_TRACKER,
         }
         for tracker in selected_trackers
     )
@@ -1221,6 +1245,14 @@ with st.sidebar:
                 download_litetracker_weights(Path(lite_weights_path).expanduser())
             st.success("Weights downloaded.")
 
+    for tap_tracker in [TAPIR_TRACKER, BOOTSTAPIR_TRACKER]:
+        if tap_tracker in selected_trackers:
+            tapir_weights_path = default_tapir_weights_path(tap_tracker)
+            if st.button(f"Download {tap_tracker} checkpoint"):
+                with st.spinner(f"Downloading {tap_tracker} PyTorch checkpoint..."):
+                    download_tapir_weights(tap_tracker, tapir_weights_path)
+                st.success(f"{tap_tracker} checkpoint downloaded to {tapir_weights_path}.")
+
     cotracker_offline_chunk_frames = 64
     if COTRACKER_OFFLINE_TRACKER in selected_trackers:
         cotracker_offline_chunk_frames = st.slider(
@@ -1232,7 +1264,14 @@ with st.sidebar:
         )
 
     external_commands: dict[str, str] = {}
-    for external_tracker in [SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER]:
+    for external_tracker in [
+        TAPIR_TRACKER,
+        BOOTSTAPIR_TRACKER,
+        SAM2_TRACKER,
+        SURGISAM2_TRACKER,
+        SAM3_TRACKER,
+        MEDSAM2_TRACKER,
+    ]:
         if external_tracker in selected_trackers:
             command_key = f"external_command_{external_tracker}"
             if external_tracker == SAM3_TRACKER:
@@ -1243,7 +1282,10 @@ with st.sidebar:
                 height=110,
                 key=command_key,
             )
-            st.caption("Available placeholders: `{video}`, `{start_frame}`, `{prompts}`, `{output}`, `{device}`.")
+            st.caption(
+                "Available placeholders: `{video}`, `{start_frame}`, `{end_frame}`, "
+                "`{prompts}`, `{output}`, `{device}`."
+            )
     st.caption("Tracking runs inside the selected interval at normal video speed.")
 
 if not uploaded:
@@ -1707,7 +1749,14 @@ try:
         else:
             st.warning("Select at least two models to compare.")
         for selected_tracker in selected_trackers:
-            if selected_tracker in {SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER}:
+            if selected_tracker in {
+                TAPIR_TRACKER,
+                BOOTSTAPIR_TRACKER,
+                SAM2_TRACKER,
+                SURGISAM2_TRACKER,
+                SAM3_TRACKER,
+                MEDSAM2_TRACKER,
+            }:
                 st.info(external_tracker_setup_instructions(selected_tracker))
         if COTRACKER_TRACKER in selected_trackers:
             st.info("First CoTracker3 run may pause while the PyTorch Hub model loads.")
@@ -1722,7 +1771,14 @@ try:
             st.info("CoTracker3 Offline loads the whole selected clip into memory before tracking.")
         elif tracker_name == LITETRACKER_TRACKER:
             st.info("LiteTracker uses the cloned official repo and the selected `.pth` weights.")
-        elif tracker_name in {SAM2_TRACKER, SURGISAM2_TRACKER, SAM3_TRACKER, MEDSAM2_TRACKER}:
+        elif tracker_name in {
+            TAPIR_TRACKER,
+            BOOTSTAPIR_TRACKER,
+            SAM2_TRACKER,
+            SURGISAM2_TRACKER,
+            SAM3_TRACKER,
+            MEDSAM2_TRACKER,
+        }:
             st.info(external_tracker_setup_instructions(tracker_name))
 
     can_start = bool(tracks) and (not compare_mode or len(selected_trackers) >= 2)
