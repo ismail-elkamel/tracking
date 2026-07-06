@@ -36,6 +36,7 @@ class InstrumentAvoidanceConfig:
     image_size: int = 512
     threshold: float = 0.4
     dilation: int = 7
+    device_name: str = CPU_DEVICE
 
 
 @dataclass(frozen=True)
@@ -678,20 +679,78 @@ def filter_visible_points(
     return last_valid_points.copy(), last_valid_points, visible_points
 
 
-@st.cache_resource(show_spinner=False)
-def load_instrument_avoidance_session(onnx_path: str):
+def onnxruntime_available_providers() -> list[str]:
+    preload_onnxruntime_cuda_libraries()
     try:
         import onnxruntime as ort
     except ImportError as error:
         raise RuntimeError(
             "onnxruntime is required to avoid instruments with the ONNX model. "
-            "Install it with `python -m pip install onnxruntime`."
+            "Install it with `python -m pip install onnxruntime` for CPU or "
+            "`python -m pip install onnxruntime-gpu` for CUDA."
         ) from error
+    return list(ort.get_available_providers())
+
+
+def preload_onnxruntime_cuda_libraries() -> None:
+    import ctypes
+
+    python_dir = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    nvidia_dir = Path(sys.prefix) / "lib" / python_dir / "site-packages" / "nvidia"
+    library_prefixes = [
+        "libcudart.so",
+        "libnvJitLink.so",
+        "libnvrtc.so",
+        "libcublas.so",
+        "libcublasLt.so",
+        "libcufft.so",
+        "libcurand.so",
+        "libcusparse.so",
+        "libcusolver.so",
+        "libcudnn.so",
+    ]
+    loaded_paths: set[Path] = set()
+    for library_prefix in library_prefixes:
+        for library_path in sorted(nvidia_dir.glob(f"*/lib/{library_prefix}*")):
+            if library_path in loaded_paths or not library_path.is_file():
+                continue
+            try:
+                ctypes.CDLL(str(library_path), mode=ctypes.RTLD_GLOBAL)
+                loaded_paths.add(library_path)
+            except OSError:
+                continue
+
+
+def instrument_onnx_providers(device_name: str) -> list[str]:
+    available = onnxruntime_available_providers()
+    if device_name == CUDA_DEVICE:
+        if "CUDAExecutionProvider" not in available:
+            raise RuntimeError(
+                "Instrument ONNX GPU was selected, but ONNXRuntime does not expose "
+                "`CUDAExecutionProvider` in this environment. Current providers: "
+                f"{available}. Install an ONNXRuntime GPU build in `track_env`, then restart Streamlit."
+            )
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
+
+
+@st.cache_resource(show_spinner=False)
+def load_instrument_avoidance_session(onnx_path: str, device_name: str):
+    preload_onnxruntime_cuda_libraries()
+    import onnxruntime as ort
 
     model_path = Path(onnx_path).expanduser().resolve()
     if not model_path.exists():
         raise RuntimeError(f"Instrument avoidance ONNX model not found: {model_path}")
-    session = ort.InferenceSession(str(model_path), providers=ort.get_available_providers())
+    session = ort.InferenceSession(
+        str(model_path),
+        providers=instrument_onnx_providers(device_name),
+    )
+    if device_name == CUDA_DEVICE and "CUDAExecutionProvider" not in session.get_providers():
+        raise RuntimeError(
+            "Instrument ONNX was requested on GPU, but ONNXRuntime created a CPU session. "
+            f"Session providers: {session.get_providers()}."
+        )
     return session, session.get_inputs()[0].name
 
 
@@ -702,7 +761,7 @@ def predict_instrument_mask(
     if config is None:
         return None
 
-    session, input_name = load_instrument_avoidance_session(config.onnx_path)
+    session, input_name = load_instrument_avoidance_session(config.onnx_path, config.device_name)
     model_size = int(config.image_size)
     resized = cv2.resize(frame_rgb, (model_size, model_size), interpolation=cv2.INTER_LINEAR)
     array = resized.astype(np.float32) / 255.0
