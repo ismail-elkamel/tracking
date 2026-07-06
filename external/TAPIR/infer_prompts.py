@@ -156,7 +156,10 @@ def load_model(args: argparse.Namespace, device: torch.device):
             "Automatic download did not create the checkpoint."
         )
     tapir_model = import_tapir_model(args.repo_path)
-    model = tapir_model.TAPIR(pyramid_level=1)
+    if args.model_profile == "tapir":
+        model = tapir_model.TAPIR(pyramid_level=0, extra_convs=False)
+    else:
+        model = tapir_model.TAPIR(pyramid_level=1, extra_convs=True)
     state_dict = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(state_dict)
     model = model.to(device)
