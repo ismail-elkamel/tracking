@@ -1500,9 +1500,10 @@ try:
                     st.caption("Use the placement panel below to rotate the model and move/resize the blue box.")
                 obj_transform_mode = st.selectbox(
                     "3D overlay transform",
-                    ["Stabilized similarity", "Locked 2D placement", "Similarity", "PnP"],
+                    ["Stabilized similarity", "Frozen placement", "Locked 2D placement", "Similarity", "PnP"],
                     help=(
                         "Stabilized similarity follows only coherent global camera/model motion. "
+                        "Frozen placement keeps the model exactly where you placed it. "
                         "Locked keeps your initial OBJ placement and moves it from tracked anchors. "
                         "PnP re-estimates a 3D pose from anchors and can change the placement."
                     ),
@@ -1553,6 +1554,11 @@ try:
                         8.0,
                         1.0,
                         help="Rejects sudden in-plane rotation from noisy points.",
+                    )
+                elif obj_transform_mode == "Frozen placement":
+                    st.caption(
+                        "The 3D model will stay fixed at the initial placement for the whole output video. "
+                        "Use this when the camera is stable or tracking noise makes the overlay drift."
                     )
                 if obj_transform_mode == "PnP":
                     pnp_a, pnp_b = st.columns(2)

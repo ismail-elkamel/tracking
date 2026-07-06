@@ -641,6 +641,8 @@ def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.nda
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
         return tracked_points
+    if metadata.transform_mode == "Frozen placement":
+        return metadata.model_points.astype(np.float32)
     if metadata.transform_mode == "Stabilized similarity":
         transform = estimate_stabilized_obj_transform(label, tracked_points)
         return apply_obj_transform(metadata.model_points, transform)
@@ -678,7 +680,10 @@ def draw_obj_mesh(
 ) -> np.ndarray:
     base_frame = output.copy()
     metadata = OBJ_OVERLAYS.get(label)
-    if metadata is not None and metadata.transform_mode == "Stabilized similarity":
+    if metadata is not None and metadata.transform_mode == "Frozen placement":
+        points = metadata.model_points.astype(np.float32)
+        anchor_points = metadata.anchor_points.astype(np.float32)
+    elif metadata is not None and metadata.transform_mode == "Stabilized similarity":
         transform = estimate_stabilized_obj_transform(label, tracked_points)
         points = apply_obj_transform(metadata.model_points, transform)
         anchor_points = apply_obj_transform(metadata.anchor_points, transform)
