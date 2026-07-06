@@ -1134,8 +1134,8 @@ with st.sidebar:
         edge_margin_px = st.slider("Reject points within edge px", 0, 120, 32, 1)
         max_jump_px = st.slider("Reject point jumps over px", 0, 300, 50, 5)
         content_margin_px = st.slider("Reject points near content edge px", 0, 200, 48, 2)
-        min_visible_points = st.slider("Minimum reliable points", 0, 50, 6, 1)
-        min_visible_fraction = st.slider("Minimum reliable point %", 0, 100, 20, 5) / 100.0
+        min_visible_points = st.slider("Minimum reliable points", 0, 50, 0, 1)
+        min_visible_fraction = st.slider("Minimum reliable point %", 0, 100, 0, 5) / 100.0
         track_validation = TrackValidationConfig(
             edge_margin=edge_margin_px,
             max_jump_px=float(max_jump_px),
@@ -1145,7 +1145,7 @@ with st.sidebar:
         )
         st.caption(
             "Hides points that stick to frame/content borders, jump too far, "
-            "or leave too few reliable points during zoom."
+            "or, if enabled above 0, leave too few reliable points during zoom."
         )
     default_instrument_onnx_path = Path("instrument_segmentation/runs/instrument_model/best.onnx")
     avoid_instruments = st.checkbox(
