@@ -45,6 +45,8 @@ class TrackValidationConfig:
     max_jump_px: float = 80.0
     content_margin: int = 24
     black_threshold: int = 12
+    min_visible_points: int = 6
+    min_visible_fraction: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,7 @@ class ObjOverlayMetadata:
 
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
 OBJ_PNP_POSE_CACHE: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+OBJ_2D_TRANSFORM_CACHE: dict[str, np.ndarray] = {}
 
 
 def obj_edges_from_faces(
@@ -108,6 +111,7 @@ def register_obj_overlay(
     render_style: str = "Wireframe",
 ) -> None:
     OBJ_PNP_POSE_CACHE.pop(label, None)
+    OBJ_2D_TRANSFORM_CACHE.pop(label, None)
     if face_colors is None:
         face_colors = [(60, 220, 255)] * len(faces)
     edges, edge_colors = obj_edges_from_faces(faces, face_colors)
@@ -289,11 +293,21 @@ def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
         return None
-    source = metadata.anchor_points
+    source = metadata.anchor_points.astype(np.float32)
     target = tracked_points.astype(np.float32)
     if len(source) < 1 or len(target) < 1:
         return None
     count = min(len(source), len(target))
+    source = source[:count]
+    target = target[:count]
+    valid = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
+    source = source[valid]
+    target = target[valid]
+    count = len(source)
+    if count < 1:
+        return None
+    if len(metadata.anchor_points) >= 3 and count < 3:
+        return None
     if count == 1:
         dx, dy = (target[0] - source[0]).astype(float)
         return np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
@@ -326,6 +340,17 @@ def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray
             np.float32([target[0], target[count // 2], target[count - 1]]),
         ) if count >= 3 else None
     return transform
+
+
+def estimate_cached_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
+    transform = estimate_obj_transform(label, tracked_points)
+    if transform is not None and np.isfinite(transform).all():
+        OBJ_2D_TRANSFORM_CACHE[label] = transform.astype(np.float32, copy=True)
+        return transform
+    cached_transform = OBJ_2D_TRANSFORM_CACHE.get(label)
+    if cached_transform is None:
+        return None
+    return cached_transform.copy()
 
 
 def apply_obj_transform(points: np.ndarray, transform: np.ndarray | None) -> np.ndarray:
@@ -452,7 +477,7 @@ def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.nda
         projected = project_obj_with_pnp(label, tracked_points)
         if projected is not None:
             return projected
-    transform = estimate_obj_transform(label, tracked_points)
+    transform = estimate_cached_obj_transform(label, tracked_points)
     return apply_obj_transform(metadata.model_points, transform)
 
 
@@ -488,11 +513,11 @@ def draw_obj_mesh(
             points = project_obj_points_from_pose(metadata, metadata.model_points_3d, pose)
             anchor_points = project_obj_points_from_pose(metadata, metadata.anchor_points_3d, pose)
         else:
-            transform = estimate_obj_transform(label, tracked_points)
+            transform = estimate_cached_obj_transform(label, tracked_points)
             points = apply_obj_transform(metadata.model_points, transform)
             anchor_points = apply_obj_transform(metadata.anchor_points, transform)
     else:
-        transform = estimate_obj_transform(label, tracked_points)
+        transform = estimate_cached_obj_transform(label, tracked_points)
         points = apply_obj_transform(metadata.model_points, transform) if metadata is not None else tracked_points
         anchor_points = apply_obj_transform(metadata.anchor_points, transform) if metadata is not None else tracked_points
     faces = metadata.faces if metadata is not None else []
@@ -846,6 +871,12 @@ def validate_tracked_points(
         jump = np.linalg.norm(points - last_valid_points, axis=1)
         valid &= jump <= max_jump
 
+    min_points = max(0, int(config.min_visible_points))
+    min_fraction_points = int(np.ceil(float(config.min_visible_fraction) * float(len(points))))
+    required_points = max(min_points, min_fraction_points)
+    if required_points > 0 and len(points) >= required_points and int(valid.sum()) < required_points:
+        valid[:] = False
+
     return valid
 
 
@@ -862,11 +893,31 @@ def regroup_visible_points(
         group_visible = visible_points[offset : offset + size]
         label = labels[index] if labels and index < len(labels) else ""
         if label.startswith("obj "):
-            grouped.append(group.astype(np.float32))
+            obj_group = group.astype(np.float32, copy=True)
+            obj_group[~group_visible] = np.nan
+            grouped.append(obj_group)
         else:
             grouped.append(group[group_visible].astype(np.float32))
         offset += size
     return grouped
+
+
+def visible_tracks_for_display(
+    tracks: list[np.ndarray],
+    visible_tracks: list[np.ndarray],
+    labels: list[str],
+) -> list[np.ndarray]:
+    displayed: list[np.ndarray] = []
+    for index, points in enumerate(tracks):
+        visible = visible_tracks[index] if index < len(visible_tracks) else np.ones(len(points), dtype=bool)
+        label = labels[index] if index < len(labels) else ""
+        if label.startswith("obj "):
+            obj_points = points.astype(np.float32, copy=True)
+            obj_points[~visible] = np.nan
+            displayed.append(obj_points)
+        else:
+            displayed.append(points[visible].astype(np.float32))
+    return displayed
 
 
 def resize_for_model(frame_rgb: np.ndarray, max_side: int) -> tuple[np.ndarray, float]:
@@ -1640,10 +1691,11 @@ def track_with_lk(
                 track_validation,
                 valid_mask,
             )
-    displayed_tracks = [
-        points[visible_tracks[index]]
-        for index, points in enumerate(active_tracks)
-    ] if freeze_lost or instrument_avoidance is not None or track_validation is not None else active_tracks
+    displayed_tracks = (
+        visible_tracks_for_display(active_tracks, visible_tracks, labels)
+        if freeze_lost or instrument_avoidance is not None or track_validation is not None
+        else active_tracks
+    )
     emit_tracked_frame(
         rgb,
         displayed_tracks,
@@ -1706,10 +1758,11 @@ def track_with_lk(
             current_frame = target_frame
             previous_gray = next_gray
             rgb = next_rgb
-            displayed_tracks = [
-                points[visible_tracks[index]]
-                for index, points in enumerate(active_tracks)
-            ] if freeze_lost or instrument_avoidance is not None or track_validation is not None else active_tracks
+            displayed_tracks = (
+                visible_tracks_for_display(active_tracks, visible_tracks, labels)
+                if freeze_lost or instrument_avoidance is not None or track_validation is not None
+                else active_tracks
+            )
             emit_tracked_frame(
                 rgb,
                 displayed_tracks,
