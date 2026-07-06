@@ -69,10 +69,16 @@ class ObjOverlayMetadata:
     pnp_min_inliers: int = 6
     show_anchor_points: bool = True
     render_style: str = "Wireframe"
+    motion_smoothing: float = 0.75
+    motion_min_inlier_ratio: float = 0.35
+    motion_max_jump_px: float = 35.0
+    motion_max_scale_change: float = 0.12
+    motion_max_rotation_deg: float = 8.0
 
 
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
 OBJ_PNP_POSE_CACHE: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+OBJ_2D_TRANSFORM_CACHE: dict[str, np.ndarray] = {}
 
 
 def obj_edges_from_faces(
@@ -111,8 +117,14 @@ def register_obj_overlay(
     pnp_min_inliers: int = 6,
     show_anchor_points: bool = True,
     render_style: str = "Wireframe",
+    motion_smoothing: float = 0.75,
+    motion_min_inlier_ratio: float = 0.35,
+    motion_max_jump_px: float = 35.0,
+    motion_max_scale_change: float = 0.12,
+    motion_max_rotation_deg: float = 8.0,
 ) -> None:
     OBJ_PNP_POSE_CACHE.pop(label, None)
+    OBJ_2D_TRANSFORM_CACHE.pop(label, None)
     if face_colors is None:
         face_colors = [(60, 220, 255)] * len(faces)
     edges, edge_colors = obj_edges_from_faces(faces, face_colors)
@@ -132,6 +144,11 @@ def register_obj_overlay(
         pnp_min_inliers=int(pnp_min_inliers),
         show_anchor_points=bool(show_anchor_points),
         render_style=render_style,
+        motion_smoothing=float(motion_smoothing),
+        motion_min_inlier_ratio=float(motion_min_inlier_ratio),
+        motion_max_jump_px=float(motion_max_jump_px),
+        motion_max_scale_change=float(motion_max_scale_change),
+        motion_max_rotation_deg=float(motion_max_rotation_deg),
     )
 
 
@@ -336,11 +353,19 @@ def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
         return None
-    source = metadata.anchor_points
+    source = metadata.anchor_points.astype(np.float32)
     target = tracked_points.astype(np.float32)
     if len(source) < 1 or len(target) < 1:
         return None
     count = min(len(source), len(target))
+    source = source[:count]
+    target = target[:count]
+    valid = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
+    source = source[valid]
+    target = target[valid]
+    count = len(source)
+    if count < 1:
+        return None
     if count == 1:
         dx, dy = (target[0] - source[0]).astype(float)
         return np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
@@ -373,6 +398,127 @@ def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray
             np.float32([target[0], target[count // 2], target[count - 1]]),
         ) if count >= 3 else None
     return transform
+
+
+def estimate_obj_transform_with_inliers(
+    metadata: ObjOverlayMetadata,
+    tracked_points: np.ndarray,
+) -> tuple[np.ndarray | None, int, int]:
+    source = metadata.anchor_points.astype(np.float32)
+    target = tracked_points.astype(np.float32)
+    count = min(len(source), len(target))
+    if count < 1:
+        return None, 0, 0
+
+    source = source[:count]
+    target = target[:count]
+    valid = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
+    source = source[valid]
+    target = target[valid]
+    valid_count = len(source)
+    if valid_count < 3:
+        transform = estimate_obj_transform_from_points(source, target)
+        return transform, valid_count, valid_count if transform is not None else 0
+
+    transform, inliers = cv2.estimateAffinePartial2D(
+        source,
+        target,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=8.0,
+        maxIters=300,
+        confidence=0.99,
+    )
+    inlier_count = int(inliers.sum()) if inliers is not None else 0
+    if transform is None:
+        transform = estimate_obj_transform_from_points(source, target)
+        inlier_count = valid_count if transform is not None else 0
+    return transform, valid_count, inlier_count
+
+
+def estimate_obj_transform_from_points(source: np.ndarray, target: np.ndarray) -> np.ndarray | None:
+    count = min(len(source), len(target))
+    if count < 1:
+        return None
+    source = source[:count].astype(np.float32)
+    target = target[:count].astype(np.float32)
+    if count == 1:
+        dx, dy = (target[0] - source[0]).astype(float)
+        return np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
+    if count == 2:
+        source_delta = source[1] - source[0]
+        target_delta = target[1] - target[0]
+        source_length = float(np.linalg.norm(source_delta))
+        target_length = float(np.linalg.norm(target_delta))
+        if source_length <= 1e-6 or target_length <= 1e-6:
+            dx, dy = (target[0] - source[0]).astype(float)
+            return np.array([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32)
+        scale = target_length / source_length
+        angle = float(np.arctan2(target_delta[1], target_delta[0]) - np.arctan2(source_delta[1], source_delta[0]))
+        cos_a = float(np.cos(angle)) * scale
+        sin_a = float(np.sin(angle)) * scale
+        transform = np.array([[cos_a, -sin_a, 0.0], [sin_a, cos_a, 0.0]], dtype=np.float32)
+        transform[:, 2] = target[0] - (transform[:, :2] @ source[0])
+        return transform
+    return cv2.getAffineTransform(
+        np.float32([source[0], source[count // 2], source[count - 1]]),
+        np.float32([target[0], target[count // 2], target[count - 1]]),
+    )
+
+
+def transform_scale_angle(transform: np.ndarray) -> tuple[float, float]:
+    linear = transform[:, :2].astype(np.float32)
+    scale = float(np.sqrt(max(abs(np.linalg.det(linear)), 1e-8)))
+    angle = float(np.degrees(np.arctan2(linear[1, 0], linear[0, 0])))
+    return scale, angle
+
+
+def angle_delta_deg(current: float, previous: float) -> float:
+    return float((current - previous + 180.0) % 360.0 - 180.0)
+
+
+def transform_anchor_center(metadata: ObjOverlayMetadata, transform: np.ndarray) -> np.ndarray:
+    center = np.mean(metadata.anchor_points.astype(np.float32), axis=0, keepdims=True)
+    return apply_obj_transform(center, transform)[0]
+
+
+def estimate_stabilized_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
+    metadata = OBJ_OVERLAYS.get(label)
+    if metadata is None:
+        return None
+
+    transform, valid_count, inlier_count = estimate_obj_transform_with_inliers(metadata, tracked_points)
+    cached_transform = OBJ_2D_TRANSFORM_CACHE.get(label)
+    if transform is None or not np.isfinite(transform).all():
+        return cached_transform.copy() if cached_transform is not None else None
+
+    min_ratio = float(np.clip(metadata.motion_min_inlier_ratio, 0.0, 1.0))
+    if valid_count >= 6 and inlier_count / max(valid_count, 1) < min_ratio:
+        return cached_transform.copy() if cached_transform is not None else transform.astype(np.float32)
+
+    if cached_transform is None:
+        transform = transform.astype(np.float32)
+        OBJ_2D_TRANSFORM_CACHE[label] = transform.copy()
+        return transform
+
+    previous_center = transform_anchor_center(metadata, cached_transform)
+    current_center = transform_anchor_center(metadata, transform)
+    center_jump = float(np.linalg.norm(current_center - previous_center))
+    previous_scale, previous_angle = transform_scale_angle(cached_transform)
+    current_scale, current_angle = transform_scale_angle(transform)
+    scale_change = abs(current_scale / max(previous_scale, 1e-6) - 1.0)
+    rotation_change = abs(angle_delta_deg(current_angle, previous_angle))
+
+    if (
+        center_jump > float(metadata.motion_max_jump_px)
+        or scale_change > float(metadata.motion_max_scale_change)
+        or rotation_change > float(metadata.motion_max_rotation_deg)
+    ):
+        return cached_transform.copy()
+
+    smoothing = float(np.clip(metadata.motion_smoothing, 0.0, 0.98))
+    smoothed = (cached_transform * smoothing + transform.astype(np.float32) * (1.0 - smoothing)).astype(np.float32)
+    OBJ_2D_TRANSFORM_CACHE[label] = smoothed.copy()
+    return smoothed
 
 
 def apply_obj_transform(points: np.ndarray, transform: np.ndarray | None) -> np.ndarray:
@@ -495,6 +641,9 @@ def transform_obj_model_points(label: str, tracked_points: np.ndarray) -> np.nda
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
         return tracked_points
+    if metadata.transform_mode == "Stabilized similarity":
+        transform = estimate_stabilized_obj_transform(label, tracked_points)
+        return apply_obj_transform(metadata.model_points, transform)
     if metadata.transform_mode == "PnP":
         projected = project_obj_with_pnp(label, tracked_points)
         if projected is not None:
@@ -529,7 +678,11 @@ def draw_obj_mesh(
 ) -> np.ndarray:
     base_frame = output.copy()
     metadata = OBJ_OVERLAYS.get(label)
-    if metadata is not None and metadata.transform_mode == "PnP":
+    if metadata is not None and metadata.transform_mode == "Stabilized similarity":
+        transform = estimate_stabilized_obj_transform(label, tracked_points)
+        points = apply_obj_transform(metadata.model_points, transform)
+        anchor_points = apply_obj_transform(metadata.anchor_points, transform)
+    elif metadata is not None and metadata.transform_mode == "PnP":
         pose = estimate_cached_obj_pnp_pose(label, metadata, tracked_points)
         if pose is not None:
             points = project_obj_points_from_pose(metadata, metadata.model_points_3d, pose)

@@ -1390,6 +1390,11 @@ try:
     obj_pnp_min_inliers = 6
     obj_show_anchor_points = False
     obj_render_style = "Wireframe"
+    obj_motion_smoothing = 0.75
+    obj_motion_min_inlier_ratio = 0.35
+    obj_motion_max_jump_px = 35.0
+    obj_motion_max_scale_change = 0.12
+    obj_motion_max_rotation_deg = 8.0
     obj_rotate_x = 0
     obj_rotate_y = 0
     obj_rotate_z = 0
@@ -1495,12 +1500,60 @@ try:
                     st.caption("Use the placement panel below to rotate the model and move/resize the blue box.")
                 obj_transform_mode = st.selectbox(
                     "3D overlay transform",
-                    ["Locked 2D placement", "PnP", "Similarity"],
+                    ["Stabilized similarity", "Locked 2D placement", "Similarity", "PnP"],
                     help=(
+                        "Stabilized similarity follows only coherent global camera/model motion. "
                         "Locked keeps your initial OBJ placement and moves it from tracked anchors. "
                         "PnP re-estimates a 3D pose from anchors and can change the placement."
                     ),
                 )
+                if obj_transform_mode == "Stabilized similarity":
+                    st.caption(
+                        "Recommended for CoTracker: rejects random anchor motion and smooths the global 2D transform."
+                    )
+                    stable_a, stable_b = st.columns(2)
+                    with stable_a:
+                        obj_motion_smoothing = st.slider(
+                            "3D motion smoothing",
+                            0.0,
+                            0.98,
+                            0.75,
+                            0.05,
+                            help="Higher values reduce jitter but follow real movement more slowly.",
+                        )
+                        obj_motion_max_jump_px = st.slider(
+                            "Max 3D update jump px",
+                            5.0,
+                            160.0,
+                            35.0,
+                            5.0,
+                            help="Rejects one-frame OBJ motion larger than this.",
+                        )
+                    with stable_b:
+                        obj_motion_min_inlier_ratio = st.slider(
+                            "Min stable inlier ratio",
+                            0.0,
+                            1.0,
+                            0.35,
+                            0.05,
+                            help="Rejects updates when too few OBJ anchors agree.",
+                        )
+                        obj_motion_max_scale_change = st.slider(
+                            "Max scale change/frame",
+                            0.01,
+                            0.60,
+                            0.12,
+                            0.01,
+                            help="Rejects sudden zoom changes from noisy points.",
+                        )
+                    obj_motion_max_rotation_deg = st.slider(
+                        "Max rotation change/frame deg",
+                        1.0,
+                        45.0,
+                        8.0,
+                        1.0,
+                        help="Rejects sudden in-plane rotation from noisy points.",
+                    )
                 if obj_transform_mode == "PnP":
                     pnp_a, pnp_b = st.columns(2)
                     with pnp_a:
@@ -1686,6 +1739,11 @@ try:
                 pnp_min_inliers=obj_pnp_min_inliers,
                 show_anchor_points=obj_show_anchor_points,
                 render_style=obj_render_style,
+                motion_smoothing=obj_motion_smoothing,
+                motion_min_inlier_ratio=obj_motion_min_inlier_ratio,
+                motion_max_jump_px=obj_motion_max_jump_px,
+                motion_max_scale_change=obj_motion_max_scale_change,
+                motion_max_rotation_deg=obj_motion_max_rotation_deg,
             )
         tracks.extend(obj_tracks)
         labels.extend(obj_labels)
