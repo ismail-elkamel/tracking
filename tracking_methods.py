@@ -45,8 +45,8 @@ class TrackValidationConfig:
     max_jump_px: float = 80.0
     content_margin: int = 24
     black_threshold: int = 12
-    min_visible_points: int = 0
-    min_visible_fraction: float = 0.0
+    min_visible_points: int = 6
+    min_visible_fraction: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -306,11 +306,7 @@ def estimate_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray
     count = len(source)
     if count < 1:
         return None
-    required_count = min(
-        len(metadata.anchor_points),
-        max(3, min(30, int(np.ceil(float(len(metadata.anchor_points)) * 0.1)))),
-    )
-    if len(metadata.anchor_points) >= 3 and count < required_count:
+    if len(metadata.anchor_points) >= 3 and count < 3:
         return None
     if count == 1:
         dx, dy = (target[0] - source[0]).astype(float)
@@ -355,10 +351,6 @@ def estimate_cached_obj_transform(label: str, tracked_points: np.ndarray) -> np.
     if cached_transform is None:
         return None
     return cached_transform.copy()
-
-
-def has_cached_obj_transform(label: str) -> bool:
-    return label in OBJ_2D_TRANSFORM_CACHE or label in OBJ_PNP_POSE_CACHE
 
 
 def apply_obj_transform(points: np.ndarray, transform: np.ndarray | None) -> np.ndarray:
@@ -902,8 +894,7 @@ def regroup_visible_points(
         label = labels[index] if labels and index < len(labels) else ""
         if label.startswith("obj "):
             obj_group = group.astype(np.float32, copy=True)
-            if has_cached_obj_transform(label):
-                obj_group[~group_visible] = np.nan
+            obj_group[~group_visible] = np.nan
             grouped.append(obj_group)
         else:
             grouped.append(group[group_visible].astype(np.float32))
@@ -922,8 +913,7 @@ def visible_tracks_for_display(
         label = labels[index] if index < len(labels) else ""
         if label.startswith("obj "):
             obj_points = points.astype(np.float32, copy=True)
-            if has_cached_obj_transform(label):
-                obj_points[~visible] = np.nan
+            obj_points[~visible] = np.nan
             displayed.append(obj_points)
         else:
             displayed.append(points[visible].astype(np.float32))
