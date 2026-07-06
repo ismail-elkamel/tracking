@@ -17,11 +17,16 @@ import streamlit as st
 MODEL_DIR = Path("models")
 LITETRACKER_DIR = Path("external/lite-tracker")
 LITETRACKER_WEIGHTS_URL = "https://huggingface.co/facebook/cotracker3/resolve/main/scaled_online.pth"
+TAPNET_DIR = Path("external/tapnet")
+TAPIR_WEIGHTS_URL = "https://storage.googleapis.com/dm-tapnet/tapir_checkpoint_panning.pt"
+BOOTSTAPIR_WEIGHTS_URL = "https://storage.googleapis.com/dm-tapnet/bootstap/bootstapir_checkpoint_v2.pt"
 
 OPENCV_TRACKER = "OpenCV Lucas-Kanade"
 COTRACKER_TRACKER = "CoTracker3 Online"
 COTRACKER_OFFLINE_TRACKER = "CoTracker3 Offline"
 LITETRACKER_TRACKER = "LiteTracker"
+TAPIR_TRACKER = "TAPIR"
+BOOTSTAPIR_TRACKER = "BootsTAPIR"
 SAM2_TRACKER = "SAM2"
 SURGISAM2_TRACKER = "SurgiSAM2"
 SAM3_TRACKER = "SAM3"
@@ -176,11 +181,41 @@ def download_litetracker_weights(path: Path) -> None:
     tmp_path.replace(path)
 
 
+def default_tapir_weights_path(tracker_name: str) -> Path:
+    if tracker_name == TAPIR_TRACKER:
+        return MODEL_DIR / "tapir_checkpoint_panning.pt"
+    return MODEL_DIR / "bootstapir_checkpoint_v2.pt"
+
+
+def download_tapir_weights(tracker_name: str, path: Path) -> None:
+    url = TAPIR_WEIGHTS_URL if tracker_name == TAPIR_TRACKER else BOOTSTAPIR_WEIGHTS_URL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp.pt")
+    urllib.request.urlretrieve(url, tmp_path)
+    tmp_path.replace(path)
+
+
 def tracker_slug(tracker_name: str) -> str:
     return tracker_name.lower().replace(" ", "_").replace("-", "_").replace("/", "_")
 
 
 def default_external_command(tracker_name: str) -> str:
+    if tracker_name == TAPIR_TRACKER:
+        return (
+            "python external/TAPIR/infer_prompts.py "
+            "--video {video} --start-frame {start_frame} --end-frame {end_frame} "
+            "--prompts {prompts} --output {output} --device {device} "
+            "--model-profile tapir --checkpoint models/tapir_checkpoint_panning.pt "
+            "--repo-path external/tapnet --resize-size 512 {freeze_lost_points}"
+        )
+    if tracker_name == BOOTSTAPIR_TRACKER:
+        return (
+            "python external/TAPIR/infer_prompts.py "
+            "--video {video} --start-frame {start_frame} --end-frame {end_frame} "
+            "--prompts {prompts} --output {output} --device {device} "
+            "--model-profile bootstapir --checkpoint models/bootstapir_checkpoint_v2.pt "
+            "--repo-path external/tapnet --resize-size 512 {freeze_lost_points}"
+        )
     if tracker_name == SAM2_TRACKER:
         return (
             "python external/Surgical-SAM-2/infer_prompts.py "
@@ -209,6 +244,8 @@ def default_external_command(tracker_name: str) -> str:
 
 
 def external_tracker_adapter_path(tracker_name: str) -> Path | None:
+    if tracker_name in {TAPIR_TRACKER, BOOTSTAPIR_TRACKER}:
+        return Path("external/TAPIR/infer_prompts.py")
     if tracker_name in {SAM2_TRACKER, SURGISAM2_TRACKER}:
         return Path("external/Surgical-SAM-2/infer_prompts.py")
     if tracker_name == SAM3_TRACKER:
@@ -235,6 +272,14 @@ def unavailable_external_tracker_message(tracker_name: str) -> str:
 
 
 def external_tracker_setup_instructions(tracker_name: str) -> str:
+    if tracker_name in {TAPIR_TRACKER, BOOTSTAPIR_TRACKER}:
+        checkpoint = default_tapir_weights_path(tracker_name)
+        return (
+            f"{tracker_name} uses Google DeepMind TAPNet's PyTorch TAPIR implementation. "
+            "Install it with `git clone https://github.com/google-deepmind/tapnet external/tapnet` "
+            "then `python -m pip install -e external/tapnet[torch]`. "
+            f"Download the checkpoint to `{checkpoint}` with the sidebar button."
+        )
     if tracker_name == SAM2_TRACKER:
         return (
             "SAM2 uses the generic SAM2.1 checkpoint "
@@ -1735,6 +1780,7 @@ def run_external_tracker(
     command_template: str,
     video_path: str | Path,
     start_frame: int,
+    end_frame: int,
     tracks: list[np.ndarray],
     labels: list[str],
     output_path: str | Path,
@@ -1753,6 +1799,7 @@ def run_external_tracker(
     command = command_template.format(
         video=shlex.quote(str(video_path)),
         start_frame=int(start_frame),
+        end_frame=int(end_frame),
         prompts=shlex.quote(str(prompt_path)),
         output=shlex.quote(str(output_path)),
         device=device,
