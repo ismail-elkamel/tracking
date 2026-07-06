@@ -3,12 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import urllib.request
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+
+TAPIR_WEIGHTS_URL = "https://storage.googleapis.com/dm-tapnet/tapir_checkpoint_panning.pt"
+BOOTSTAPIR_WEIGHTS_URL = "https://storage.googleapis.com/dm-tapnet/bootstap/bootstapir_checkpoint_v2.pt"
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--model-profile", default="bootstapir", choices=["tapir", "bootstapir"])
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--auto-download", action="store_true")
     parser.add_argument("--repo-path", default="external/tapnet")
     parser.add_argument("--resize-size", type=int, default=512)
     parser.add_argument("--query-chunk-size", type=int, default=64)
@@ -125,12 +131,29 @@ def postprocess_visibility(occlusions: torch.Tensor, expected_dist: torch.Tensor
     return confidence > float(threshold)
 
 
+def download_checkpoint(model_profile: str, checkpoint_path: Path) -> None:
+    url = TAPIR_WEIGHTS_URL if model_profile == "tapir" else BOOTSTAPIR_WEIGHTS_URL
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = checkpoint_path.with_suffix(".tmp.pt")
+    print(f"Downloading {model_profile} checkpoint to {checkpoint_path}...", flush=True)
+    urllib.request.urlretrieve(url, tmp_path)
+    tmp_path.replace(checkpoint_path)
+
+
 def load_model(args: argparse.Namespace, device: torch.device):
     checkpoint_path = Path(args.checkpoint).expanduser().resolve()
     if not checkpoint_path.exists():
+        if args.auto_download:
+            download_checkpoint(args.model_profile, checkpoint_path)
+        else:
+            raise RuntimeError(
+                f"{args.model_profile} checkpoint not found: {checkpoint_path}\n"
+                "Use the app sidebar download button or download it manually."
+            )
+    if not checkpoint_path.exists():
         raise RuntimeError(
             f"{args.model_profile} checkpoint not found: {checkpoint_path}\n"
-            "Use the app sidebar download button or download it manually."
+            "Automatic download did not create the checkpoint."
         )
     tapir_model = import_tapir_model(args.repo_path)
     model = tapir_model.TAPIR(pyramid_level=1)
