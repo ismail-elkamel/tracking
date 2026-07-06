@@ -206,7 +206,8 @@ def default_external_command(tracker_name: str) -> str:
             "--video {video} --start-frame {start_frame} --end-frame {end_frame} "
             "--prompts {prompts} --output {output} --device {device} "
             "--model-profile tapir --checkpoint models/tapir_checkpoint_panning.pt "
-            "--auto-download --repo-path external/tapnet --resize-size 512 {freeze_lost_points}"
+            "--auto-download --repo-path external/tapnet --resize-size 256 "
+            "--query-chunk-size 32 {freeze_lost_points}"
         )
     if tracker_name == BOOTSTAPIR_TRACKER:
         return (
@@ -214,7 +215,8 @@ def default_external_command(tracker_name: str) -> str:
             "--video {video} --start-frame {start_frame} --end-frame {end_frame} "
             "--prompts {prompts} --output {output} --device {device} "
             "--model-profile bootstapir --checkpoint models/bootstapir_checkpoint_v2.pt "
-            "--auto-download --repo-path external/tapnet --resize-size 512 {freeze_lost_points}"
+            "--auto-download --repo-path external/tapnet --resize-size 256 "
+            "--query-chunk-size 32 {freeze_lost_points}"
         )
     if tracker_name == SAM2_TRACKER:
         return (

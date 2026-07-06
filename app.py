@@ -1276,6 +1276,8 @@ with st.sidebar:
             command_key = f"external_command_{external_tracker}"
             if external_tracker == SAM3_TRACKER:
                 command_key = "external_command_SAM3_track_env"
+            if external_tracker in {TAPIR_TRACKER, BOOTSTAPIR_TRACKER}:
+                command_key = f"external_command_{external_tracker}_resize256_v2"
             external_commands[external_tracker] = st.text_area(
                 f"{external_tracker} command",
                 default_external_command(external_tracker),

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.request
 from pathlib import Path
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import cv2
 import numpy as np
@@ -28,8 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--auto-download", action="store_true")
     parser.add_argument("--repo-path", default="external/tapnet")
-    parser.add_argument("--resize-size", type=int, default=512)
-    parser.add_argument("--query-chunk-size", type=int, default=64)
+    parser.add_argument("--resize-size", type=int, default=256)
+    parser.add_argument("--query-chunk-size", type=int, default=32)
     parser.add_argument("--visibility-threshold", type=float, default=0.5)
     parser.add_argument("--hide-lost-points", action="store_true")
     return parser.parse_args()
@@ -283,7 +286,23 @@ def main() -> None:
     tracks, labels = read_prompts(args.prompts)
     points_xy, sizes = flatten_tracks(tracks)
     frames_rgb, fps = read_video_interval(args.video, args.start_frame, args.end_frame)
-    predicted, visible = run_tapir(frames_rgb, points_xy, args, device)
+    try:
+        predicted, visible = run_tapir(frames_rgb, points_xy, args, device)
+    except torch.cuda.OutOfMemoryError as error:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        raise RuntimeError(
+            "TAPIR/BootsTAPIR ran out of GPU memory.\n"
+            f"Frames: {len(frames_rgb)}, points: {len(points_xy)}, resize-size: {args.resize_size}, "
+            f"query-chunk-size: {args.query_chunk_size}.\n\n"
+            "Try one of these:\n"
+            "- shorten the selected video interval,\n"
+            "- edit the TAPIR command and use `--resize-size 192` or `--resize-size 128`,\n"
+            "- edit the TAPIR command and use `--query-chunk-size 16`,\n"
+            "- choose CPU for TAPIR if you only need a slow test,\n"
+            "- restart Streamlit/Python before retrying CUDA.\n\n"
+            f"Original CUDA error: {error}"
+        ) from error
     write_video(args.output, frames_rgb, predicted, visible, sizes, labels, fps, args.hide_lost_points)
 
 
