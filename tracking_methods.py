@@ -22,6 +22,7 @@ TAPIR_WEIGHTS_URL = "https://storage.googleapis.com/dm-tapnet/tapir_checkpoint_p
 BOOTSTAPIR_WEIGHTS_URL = "https://storage.googleapis.com/dm-tapnet/bootstap/bootstapir_checkpoint_v2.pt"
 
 OPENCV_TRACKER = "OpenCV Lucas-Kanade"
+OPENCV_GLOBAL_MOTION_TRACKER = "OpenCV Global Motion"
 COTRACKER_TRACKER = "CoTracker3 Online"
 COTRACKER_OFFLINE_TRACKER = "CoTracker3 Offline"
 LITETRACKER_TRACKER = "LiteTracker"
@@ -48,8 +49,23 @@ class InstrumentAvoidanceConfig:
 class TrackValidationConfig:
     edge_margin: int = 8
     max_jump_px: float = 80.0
+    max_total_drift_px: float = 220.0
     content_margin: int = 24
     black_threshold: int = 12
+    motion_residual_px: float = 30.0
+    min_visible_points: int = 3
+    min_visible_fraction: float = 0.15
+
+
+@dataclass(frozen=True)
+class GlobalMotionConfig:
+    max_features: int = 2000
+    min_inliers: int = 30
+    ransac_reprojection_px: float = 5.0
+    smoothing: float = 0.25
+    max_translation_px: float = 80.0
+    max_scale_change: float = 0.12
+    max_rotation_deg: float = 8.0
 
 
 @dataclass(frozen=True)
@@ -69,12 +85,15 @@ class ObjOverlayMetadata:
     pnp_min_inliers: int = 6
     show_anchor_points: bool = True
     render_style: str = "Wireframe"
+    render_opacity: float = 0.5
     motion_smoothing: float = 0.75
     motion_min_inlier_ratio: float = 0.35
     motion_strong_inlier_ratio: float = 0.70
     motion_max_jump_px: float = 35.0
     motion_max_scale_change: float = 0.12
     motion_max_rotation_deg: float = 8.0
+    motion_min_total_scale: float = 0.55
+    motion_max_total_scale: float = 1.80
 
 
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
@@ -118,12 +137,15 @@ def register_obj_overlay(
     pnp_min_inliers: int = 6,
     show_anchor_points: bool = True,
     render_style: str = "Wireframe",
+    render_opacity: float = 0.5,
     motion_smoothing: float = 0.75,
     motion_min_inlier_ratio: float = 0.35,
     motion_strong_inlier_ratio: float = 0.70,
     motion_max_jump_px: float = 35.0,
     motion_max_scale_change: float = 0.12,
     motion_max_rotation_deg: float = 8.0,
+    motion_min_total_scale: float = 0.55,
+    motion_max_total_scale: float = 1.80,
 ) -> None:
     OBJ_PNP_POSE_CACHE.pop(label, None)
     OBJ_2D_TRANSFORM_CACHE.pop(label, None)
@@ -146,12 +168,15 @@ def register_obj_overlay(
         pnp_min_inliers=int(pnp_min_inliers),
         show_anchor_points=bool(show_anchor_points),
         render_style=render_style,
+        render_opacity=float(np.clip(render_opacity, 0.0, 1.0)),
         motion_smoothing=float(motion_smoothing),
         motion_min_inlier_ratio=float(motion_min_inlier_ratio),
         motion_strong_inlier_ratio=float(motion_strong_inlier_ratio),
         motion_max_jump_px=float(motion_max_jump_px),
         motion_max_scale_change=float(motion_max_scale_change),
         motion_max_rotation_deg=float(motion_max_rotation_deg),
+        motion_min_total_scale=float(motion_min_total_scale),
+        motion_max_total_scale=float(motion_max_total_scale),
     )
 
 
@@ -484,6 +509,25 @@ def transform_anchor_center(metadata: ObjOverlayMetadata, transform: np.ndarray)
     return apply_obj_transform(center, transform)[0]
 
 
+def clamp_transform_total_scale(
+    metadata: ObjOverlayMetadata,
+    transform: np.ndarray,
+) -> np.ndarray:
+    scale, _ = transform_scale_angle(transform)
+    min_scale = max(1e-3, float(metadata.motion_min_total_scale))
+    max_scale = max(min_scale, float(metadata.motion_max_total_scale))
+    clamped_scale = float(np.clip(scale, min_scale, max_scale))
+    if abs(clamped_scale - scale) <= 1e-6:
+        return transform.astype(np.float32)
+
+    source_center = np.mean(metadata.anchor_points.astype(np.float32), axis=0)
+    target_center = transform_anchor_center(metadata, transform)
+    clamped = transform.astype(np.float32, copy=True)
+    clamped[:, :2] *= clamped_scale / max(scale, 1e-6)
+    clamped[:, 2] = target_center - (clamped[:, :2] @ source_center)
+    return clamped
+
+
 def estimate_stabilized_obj_transform(label: str, tracked_points: np.ndarray) -> np.ndarray | None:
     metadata = OBJ_OVERLAYS.get(label)
     if metadata is None:
@@ -493,6 +537,7 @@ def estimate_stabilized_obj_transform(label: str, tracked_points: np.ndarray) ->
     cached_transform = OBJ_2D_TRANSFORM_CACHE.get(label)
     if transform is None or not np.isfinite(transform).all():
         return cached_transform.copy() if cached_transform is not None else None
+    transform = clamp_transform_total_scale(metadata, transform)
 
     inlier_ratio = inlier_count / max(valid_count, 1)
     min_ratio = float(np.clip(metadata.motion_min_inlier_ratio, 0.0, 1.0))
@@ -779,7 +824,10 @@ def draw_obj_mesh(
         cv2.fillConvexPoly(overlay, hull, (60, 220, 255), lineType=cv2.LINE_AA)
         cv2.fillConvexPoly(mask, hull, 255, lineType=cv2.LINE_AA)
 
-    blended = cv2.addWeighted(overlay, 0.5, output, 0.5, 0)
+    opacity = 0.5
+    if metadata is not None:
+        opacity = float(np.clip(metadata.render_opacity, 0.0, 1.0))
+    blended = cv2.addWeighted(overlay, opacity, output, 1.0 - opacity, 0)
     output[mask > 0] = blended[mask > 0]
     if metadata is None or metadata.show_anchor_points:
         for point in np.round(anchor_points[:: max(1, len(anchor_points) // 220)]).astype(np.int32):
@@ -812,7 +860,7 @@ def draw_tracks(
     for index, points in enumerate(tracks):
         color = colors[index % len(colors)]
         label = labels[index] if index < len(labels) else f"annotation {index + 1}"
-        if label.startswith("obj "):
+        if label.startswith(("obj ", "grid ")):
             continue
         pts = np.round(points).astype(int)
         if len(pts) == 1:
@@ -1008,12 +1056,72 @@ def points_outside_instrument(points: np.ndarray, instrument_mask: np.ndarray | 
     return in_bounds & ~instrument_mask[y, x]
 
 
+def reject_motion_outliers(
+    points: np.ndarray,
+    last_valid_points: np.ndarray,
+    valid_mask: np.ndarray,
+    max_residual_px: float,
+) -> np.ndarray:
+    if max_residual_px <= 0 or len(points) != len(last_valid_points):
+        return valid_mask
+
+    candidate_indices = np.flatnonzero(valid_mask)
+    if len(candidate_indices) < 4:
+        return valid_mask
+
+    source = last_valid_points[candidate_indices].astype(np.float32)
+    target = points[candidate_indices].astype(np.float32)
+    finite = np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
+    if int(finite.sum()) < 4:
+        return valid_mask
+
+    finite_indices = candidate_indices[finite]
+    transform, inliers = cv2.estimateAffinePartial2D(
+        source[finite],
+        target[finite],
+        method=cv2.RANSAC,
+        ransacReprojThreshold=float(max_residual_px),
+        maxIters=200,
+        confidence=0.99,
+    )
+    if transform is None:
+        return valid_mask
+
+    projected = apply_obj_transform(last_valid_points[finite_indices], transform)
+    residual = np.linalg.norm(projected - points[finite_indices], axis=1)
+    kept = residual <= float(max_residual_px)
+    if inliers is not None:
+        kept &= inliers.reshape(-1).astype(bool)
+
+    filtered = valid_mask.copy()
+    filtered[finite_indices] = kept
+    return filtered
+
+
+def enforce_minimum_visible_points(
+    valid_mask: np.ndarray,
+    total_points: int,
+    config: TrackValidationConfig,
+) -> np.ndarray:
+    min_points = max(0, int(config.min_visible_points))
+    min_fraction_points = int(np.ceil(float(config.min_visible_fraction) * float(total_points)))
+    required = max(min_points, min_fraction_points)
+    if required <= 0:
+        return valid_mask
+    if total_points < required:
+        return valid_mask
+    if int(valid_mask.sum()) >= required:
+        return valid_mask
+    return np.zeros_like(valid_mask, dtype=bool)
+
+
 def validate_tracked_points(
     points: np.ndarray,
     last_valid_points: np.ndarray,
     frame_rgb: np.ndarray,
     config: TrackValidationConfig | None,
     base_valid_mask: np.ndarray | None = None,
+    reference_points: np.ndarray | None = None,
 ) -> np.ndarray:
     if base_valid_mask is None:
         valid = np.ones(len(points), dtype=bool)
@@ -1054,6 +1162,19 @@ def validate_tracked_points(
         jump = np.linalg.norm(points - last_valid_points, axis=1)
         valid &= jump <= max_jump
 
+    max_total_drift = float(config.max_total_drift_px)
+    if max_total_drift > 0 and reference_points is not None and len(reference_points) == len(points):
+        drift = np.linalg.norm(points - reference_points.astype(np.float32), axis=1)
+        valid &= drift <= max_total_drift
+
+    valid = reject_motion_outliers(
+        points,
+        last_valid_points,
+        valid,
+        float(config.motion_residual_px),
+    )
+    valid = enforce_minimum_visible_points(valid, len(points), config)
+
     return valid
 
 
@@ -1070,7 +1191,9 @@ def regroup_visible_points(
         group_visible = visible_points[offset : offset + size]
         label = labels[index] if labels and index < len(labels) else ""
         if label.startswith("obj "):
-            grouped.append(group.astype(np.float32))
+            obj_group = group.astype(np.float32, copy=True)
+            obj_group[~group_visible] = np.nan
+            grouped.append(obj_group)
         else:
             grouped.append(group[group_visible].astype(np.float32))
         offset += size
@@ -1444,6 +1567,7 @@ def track_with_cotracker3_online(
                     original_rgb,
                     track_validation,
                     valid_mask,
+                    flat_points,
                 )
                 points, last_valid_points, visible_points = filter_visible_points(
                     points,
@@ -1499,6 +1623,7 @@ def track_with_cotracker3_online(
                         frame_rgb,
                         track_validation,
                         valid_mask,
+                        flat_points,
                     )
                     initial_points, last_valid_points, visible_points = filter_visible_points(
                         flat_points,
@@ -1648,6 +1773,7 @@ def track_with_cotracker3_offline(
                         frame_rgb,
                         track_validation,
                         valid_mask,
+                        flat_points,
                     )
                     points, last_valid_points, visible_points = filter_visible_points(
                         points,
@@ -1764,6 +1890,7 @@ def track_with_litetracker(
                         frame_rgb,
                         track_validation,
                         valid_mask,
+                        flat_points,
                     )
                     points, last_valid_points, visible_points = filter_visible_points(
                         points,
@@ -1935,6 +2062,194 @@ def track_with_lk(
         if output_writer is not None:
             output_writer.release()
 
+    return saved_path
+
+
+def affine_to_homogeneous(transform: np.ndarray) -> np.ndarray:
+    homogeneous = np.eye(3, dtype=np.float32)
+    homogeneous[:2, :] = transform.astype(np.float32)
+    return homogeneous
+
+
+def homogeneous_to_affine(transform: np.ndarray) -> np.ndarray:
+    return transform[:2, :].astype(np.float32)
+
+
+def estimate_global_motion_transform(
+    previous_gray: np.ndarray,
+    next_gray: np.ndarray,
+    config: GlobalMotionConfig,
+) -> tuple[np.ndarray | None, int, int]:
+    orb = cv2.ORB_create(
+        nfeatures=max(200, int(config.max_features)),
+        scaleFactor=1.2,
+        nlevels=8,
+        fastThreshold=12,
+    )
+    previous_keypoints, previous_desc = orb.detectAndCompute(previous_gray, None)
+    next_keypoints, next_desc = orb.detectAndCompute(next_gray, None)
+    if previous_desc is None or next_desc is None:
+        return None, 0, 0
+    if len(previous_keypoints) < 4 or len(next_keypoints) < 4:
+        return None, 0, 0
+
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+    raw_matches = matcher.knnMatch(previous_desc, next_desc, k=2)
+    good_matches = []
+    for pair in raw_matches:
+        if len(pair) < 2:
+            continue
+        first, second = pair
+        if first.distance < 0.75 * second.distance:
+            good_matches.append(first)
+    if len(good_matches) < 4:
+        return None, len(good_matches), 0
+
+    source = np.float32([previous_keypoints[match.queryIdx].pt for match in good_matches])
+    target = np.float32([next_keypoints[match.trainIdx].pt for match in good_matches])
+    transform, inliers = cv2.estimateAffinePartial2D(
+        source,
+        target,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=float(config.ransac_reprojection_px),
+        maxIters=2000,
+        confidence=0.995,
+    )
+    if transform is None or not np.isfinite(transform).all():
+        return None, len(good_matches), 0
+    inlier_count = int(inliers.sum()) if inliers is not None else 0
+    return transform.astype(np.float32), len(good_matches), inlier_count
+
+
+def acceptable_global_motion(transform: np.ndarray, inlier_count: int, config: GlobalMotionConfig) -> bool:
+    if inlier_count < int(config.min_inliers):
+        return False
+    scale, angle = transform_scale_angle(transform)
+    scale_change = abs(scale - 1.0)
+    translation = float(np.linalg.norm(transform[:, 2]))
+    return (
+        translation <= float(config.max_translation_px)
+        and scale_change <= float(config.max_scale_change)
+        and abs(angle) <= float(config.max_rotation_deg)
+    )
+
+
+def smooth_incremental_transform(transform: np.ndarray, smoothing: float) -> np.ndarray:
+    smoothing = float(np.clip(smoothing, 0.0, 0.98))
+    identity = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+    return (identity * smoothing + transform.astype(np.float32) * (1.0 - smoothing)).astype(np.float32)
+
+
+def transform_groups_with_global_motion(
+    initial_tracks: list[np.ndarray],
+    cumulative_transform: np.ndarray,
+) -> list[np.ndarray]:
+    transform = homogeneous_to_affine(cumulative_transform)
+    return [apply_obj_transform(track, transform) for track in initial_tracks]
+
+
+def track_with_global_motion(
+    path: str,
+    start_frame: int,
+    end_frame: int,
+    tracks: list[np.ndarray],
+    labels: list[str],
+    fps: float,
+    frame_placeholder,
+    status_placeholder,
+    output_path: str | Path | None = None,
+    show_live_preview: bool = False,
+    instrument_avoidance: InstrumentAvoidanceConfig | None = None,
+    config: GlobalMotionConfig | None = None,
+) -> Path | None:
+    if config is None:
+        config = GlobalMotionConfig()
+    if not any(label.startswith("obj ") for label in labels):
+        st.error("OpenCV Global Motion needs a 3D model overlay to render.")
+        return None
+
+    cap = cv2.VideoCapture(path)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    ok, previous_bgr = cap.read()
+    if not ok:
+        st.error("Could not read the selected start frame.")
+        cap.release()
+        return None
+
+    previous_gray = cv2.cvtColor(previous_bgr, cv2.COLOR_BGR2GRAY)
+    previous_rgb = cv2.cvtColor(previous_bgr, cv2.COLOR_BGR2RGB)
+    output_writer = open_output_writer(output_path, previous_rgb, fps)
+    saved_path = Path(output_path) if output_path else None
+    start_time = time.perf_counter()
+    cumulative_transform = np.eye(3, dtype=np.float32)
+    initial_tracks = [track.copy().astype(np.float32) for track in tracks]
+    frames_written = 0
+
+    try:
+        instrument_mask = predict_instrument_mask(previous_rgb, instrument_avoidance)
+        emit_tracked_frame(
+            previous_rgb,
+            transform_groups_with_global_motion(initial_tracks, cumulative_transform),
+            labels,
+            output_writer,
+            show_live_preview,
+            frame_placeholder,
+            instrument_mask,
+        )
+        frames_written += 1
+
+        for absolute_frame in range(start_frame + 1, end_frame + 1):
+            ok, next_bgr = cap.read()
+            if not ok:
+                break
+
+            next_gray = cv2.cvtColor(next_bgr, cv2.COLOR_BGR2GRAY)
+            next_rgb = cv2.cvtColor(next_bgr, cv2.COLOR_BGR2RGB)
+            transform, match_count, inlier_count = estimate_global_motion_transform(
+                previous_gray,
+                next_gray,
+                config,
+            )
+            accepted = transform is not None and acceptable_global_motion(transform, inlier_count, config)
+            motion_text = "no transform"
+            if accepted:
+                transform = smooth_incremental_transform(transform, float(config.smoothing))
+                scale, angle = transform_scale_angle(transform)
+                dx, dy = transform[:, 2]
+                motion_text = f"dx={dx:+.1f} dy={dy:+.1f} scale={scale:.3f} rot={angle:+.1f}deg"
+                cumulative_transform = affine_to_homogeneous(transform) @ cumulative_transform
+            elif transform is not None:
+                scale, angle = transform_scale_angle(transform)
+                dx, dy = transform[:, 2]
+                motion_text = f"rejected dx={dx:+.1f} dy={dy:+.1f} scale={scale:.3f} rot={angle:+.1f}deg"
+
+            instrument_mask = predict_instrument_mask(next_rgb, instrument_avoidance)
+            grouped_tracks = transform_groups_with_global_motion(initial_tracks, cumulative_transform)
+            emit_tracked_frame(
+                next_rgb,
+                grouped_tracks,
+                labels,
+                output_writer,
+                show_live_preview,
+                frame_placeholder,
+                instrument_mask,
+            )
+            frames_written += 1
+            state = "accepted" if accepted else "frozen"
+            status_placeholder.caption(
+                f"Global motion frame {absolute_frame} / {end_frame}: {state}, "
+                f"{inlier_count}/{match_count} inliers, {motion_text}"
+            )
+            if show_live_preview:
+                sync_to_video_clock(start_time, absolute_frame - start_frame, fps)
+            previous_gray = next_gray
+    finally:
+        cap.release()
+        if output_writer is not None:
+            output_writer.release()
+
+    if saved_path is not None and frames_written == 0:
+        raise RuntimeError("OpenCV Global Motion did not write any output frames.")
     return saved_path
 
 

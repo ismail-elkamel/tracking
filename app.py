@@ -26,9 +26,11 @@ from tracking_methods import (
     COTRACKER_TRACKER,
     CPU_DEVICE,
     CUDA_DEVICE,
+    GlobalMotionConfig,
     InstrumentAvoidanceConfig,
     LITETRACKER_TRACKER,
     MEDSAM2_TRACKER,
+    OPENCV_GLOBAL_MOTION_TRACKER,
     OPENCV_TRACKER,
     SAM2_TRACKER,
     SAM3_TRACKER,
@@ -48,6 +50,7 @@ from tracking_methods import (
     onnxruntime_available_providers,
     run_external_tracker,
     TAPIR_TRACKER,
+    track_with_global_motion,
     track_with_cotracker3_offline,
     track_with_cotracker3_online,
     track_with_litetracker,
@@ -91,13 +94,12 @@ OUTPUT_DIR = TEMP_DIR / "output"
 MAX_CANVAS_WIDTH = 900
 TRACKER_OPTIONS = [
     OPENCV_TRACKER,
+    OPENCV_GLOBAL_MOTION_TRACKER,
     COTRACKER_TRACKER,
     COTRACKER_OFFLINE_TRACKER,
     LITETRACKER_TRACKER,
     TAPIR_TRACKER,
     BOOTSTAPIR_TRACKER,
-    SAM2_TRACKER,
-    SURGISAM2_TRACKER,
     SAM3_TRACKER,
     MEDSAM2_TRACKER,
 ]
@@ -339,9 +341,29 @@ def draw_obj_overlay(
     faces: list[list[int]],
     face_colors: list[tuple[int, int, int]] | None = None,
     color: tuple[int, int, int] = (60, 220, 255),
+    render_style: str = "Wireframe",
+    render_opacity: float = 0.5,
 ) -> np.ndarray:
     output = frame_rgb.copy()
     if not len(points_xy):
+        return output
+    if render_style != "Wireframe":
+        overlay = output.copy()
+        mask = np.zeros(output.shape[:2], dtype=np.uint8)
+        for face_index, face in enumerate(faces):
+            valid_face = [index for index in face if 0 <= index < len(points_xy)]
+            if len(valid_face) < 3:
+                continue
+            pts = np.round(points_xy[valid_face]).astype(np.int32)
+            face_color = color
+            if face_colors is not None and face_index < len(face_colors):
+                face_color = face_colors[face_index]
+            cv2.fillPoly(overlay, [pts], face_color, lineType=cv2.LINE_AA)
+            cv2.fillPoly(mask, [pts], 255, lineType=cv2.LINE_AA)
+            cv2.polylines(overlay, [pts], True, face_color, 1, lineType=cv2.LINE_AA)
+        opacity = float(np.clip(render_opacity, 0.0, 1.0))
+        blended = cv2.addWeighted(overlay, opacity, output, 1.0 - opacity, 0)
+        output[mask > 0] = blended[mask > 0]
         return output
     for face_index, face in enumerate(faces):
         valid_face = [index for index in face if 0 <= index < len(points_xy)]
@@ -908,18 +930,90 @@ def generate_grid_tracks(
     max_points: int,
     regions: list[np.ndarray] | None = None,
 ) -> tuple[list[np.ndarray], list[str]]:
-    x_values = np.arange(margin, max(margin + 1, frame_width - margin), spacing, dtype=np.float32)
-    y_values = np.arange(margin, max(margin + 1, frame_height - margin), spacing, dtype=np.float32)
-    points: list[np.ndarray] = []
-    for y in y_values:
-        for x in x_values:
-            if regions and not any(cv2.pointPolygonTest(region, (float(x), float(y)), False) >= 0 for region in regions):
+    if max_points <= 0:
+        return [], []
+
+    margin = max(0, int(margin))
+    valid_mask = np.zeros((frame_height, frame_width), dtype=np.uint8)
+    x0 = min(max(margin, 0), max(frame_width - 1, 0))
+    y0 = min(max(margin, 0), max(frame_height - 1, 0))
+    x1 = max(x0 + 1, frame_width - margin)
+    y1 = max(y0 + 1, frame_height - margin)
+    valid_mask[y0:y1, x0:x1] = 255
+    if regions:
+        region_mask = np.zeros_like(valid_mask)
+        for region in regions:
+            if len(region) >= 3:
+                polygon = np.round(region).astype(np.int32)
+                polygon[:, 0] = np.clip(polygon[:, 0], 0, max(frame_width - 1, 0))
+                polygon[:, 1] = np.clip(polygon[:, 1], 0, max(frame_height - 1, 0))
+                cv2.fillPoly(region_mask, [polygon], 255, lineType=cv2.LINE_AA)
+        valid_mask = cv2.bitwise_and(valid_mask, region_mask)
+
+    ys, xs = np.nonzero(valid_mask > 0)
+    if len(xs) == 0:
+        return [], []
+
+    coords = np.column_stack([xs, ys]).astype(np.float32)
+    min_x, min_y = coords.min(axis=0)
+    max_x, max_y = coords.max(axis=0)
+    region_width = max(float(max_x - min_x), 1.0)
+    region_height = max(float(max_y - min_y), 1.0)
+    if spacing > 0:
+        cols = max(1, int(np.ceil(region_width / float(spacing))))
+        rows = max(1, int(np.ceil(region_height / float(spacing))))
+    else:
+        cols = max(1, int(round(np.sqrt(float(max_points) * region_width / region_height))))
+        rows = max(1, int(np.ceil(float(max_points) / float(cols))))
+    while cols * rows < max_points:
+        if region_width >= region_height:
+            cols += 1
+        else:
+            rows += 1
+
+    selected: list[np.ndarray] = []
+    seen: set[tuple[int, int]] = set()
+    x_edges = np.linspace(min_x, max_x + 1.0, cols + 1)
+    y_edges = np.linspace(min_y, max_y + 1.0, rows + 1)
+    for row in range(rows):
+        for col in range(cols):
+            cell_x0 = int(max(0, np.floor(x_edges[col])))
+            cell_x1 = int(min(frame_width, np.ceil(x_edges[col + 1])))
+            cell_y0 = int(max(0, np.floor(y_edges[row])))
+            cell_y1 = int(min(frame_height, np.ceil(y_edges[row + 1])))
+            cell_mask = valid_mask[cell_y0:cell_y1, cell_x0:cell_x1] > 0
+            cell_ys, cell_xs = np.nonzero(cell_mask)
+            if len(cell_xs) == 0:
                 continue
-            points.append(np.array([[x, y]], dtype=np.float32))
-    if max_points > 0:
-        center = np.array([frame_width / 2.0, frame_height / 2.0], dtype=np.float32)
-        points.sort(key=lambda item: float(np.linalg.norm(item[0] - center)))
-        points = points[:max_points]
+            target_x = (x_edges[col] + x_edges[col + 1]) * 0.5
+            target_y = (y_edges[row] + y_edges[row + 1]) * 0.5
+            cell_points = np.column_stack([cell_xs + cell_x0, cell_ys + cell_y0]).astype(np.float32)
+            distances = np.sum((cell_points - np.array([target_x, target_y], dtype=np.float32)) ** 2, axis=1)
+            for coord_index in np.argsort(distances):
+                point = cell_points[int(coord_index)]
+                key = (int(point[0]), int(point[1]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                selected.append(point)
+                break
+            if len(selected) >= max_points:
+                break
+        if len(selected) >= max_points:
+            break
+
+    if len(selected) < max_points:
+        remaining_indices = np.linspace(0, len(coords) - 1, min(len(coords), max_points), dtype=np.int32)
+        for point in coords[remaining_indices]:
+            key = (int(point[0]), int(point[1]))
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(point)
+            if len(selected) >= max_points:
+                break
+
+    points = [point[None].astype(np.float32) for point in selected[:max_points]]
     labels = [f"grid {index}" for index in range(1, len(points) + 1)]
     return points, labels
 
@@ -979,6 +1073,7 @@ def run_tracker_model(
     freeze_lost_points: bool,
     instrument_avoidance: InstrumentAvoidanceConfig | None,
     track_validation: TrackValidationConfig | None,
+    global_motion_config: GlobalMotionConfig | None,
 ) -> Path | None:
     if tracker_name == OPENCV_TRACKER:
         return track_with_lk(
@@ -996,6 +1091,21 @@ def run_tracker_model(
             freeze_lost_points,
             instrument_avoidance,
             track_validation,
+        )
+    if tracker_name == OPENCV_GLOBAL_MOTION_TRACKER:
+        return track_with_global_motion(
+            str(video_path),
+            start_frame,
+            end_frame,
+            tracks,
+            labels,
+            fps,
+            frame_placeholder,
+            status_placeholder,
+            result_path,
+            show_live_preview,
+            instrument_avoidance,
+            global_motion_config,
         )
     if tracker_name == COTRACKER_TRACKER:
         return track_with_cotracker3_online(
@@ -1096,7 +1206,7 @@ with st.sidebar:
     stroke_color = st.color_picker("Color", "#ff485c")
     add_point_cloud = st.checkbox("Add point cloud", value=False)
     point_cloud_area = "Drawn rect/polygon areas"
-    grid_spacing = 120
+    grid_spacing = 0
     grid_margin = 48
     grid_max_points = 50
     if add_point_cloud:
@@ -1104,15 +1214,9 @@ with st.sidebar:
             "Point cloud area",
             ["Drawn rect/polygon areas", "Full frame"],
         )
-        point_cloud_preset = st.selectbox("Point cloud speed", ["Fast", "Balanced", "Dense"])
-        preset_spacing, preset_max_points = {
-            "Fast": (120, 50),
-            "Balanced": (96, 100),
-            "Dense": (64, 200),
-        }[point_cloud_preset]
-        grid_spacing = st.slider("Grid spacing", 8, 200, preset_spacing, 8)
+        grid_max_points = st.selectbox("Point cloud count", [50, 80, 120, 200], index=1)
         grid_margin = st.slider("Grid margin", 0, 160, 48, 4)
-        grid_max_points = st.slider("Max grid points", 10, 500, preset_max_points, 10)
+        st.caption("Draw one or more polygons/rectangles; points are placed uniformly inside them.")
     enable_gpu_local_neural = st.checkbox("Use GPU for CoTracker/LiteTracker", value=cuda_is_available())
     st.divider()
     unavailable_trackers = [
@@ -1148,6 +1252,26 @@ with st.sidebar:
         selected_trackers = [tracker_name]
         collage_tile_width = 640
     frame_skip = st.slider("OpenCV frame step", 1, 10, 1)
+    global_motion_config: GlobalMotionConfig | None = None
+    if OPENCV_GLOBAL_MOTION_TRACKER in selected_trackers:
+        with st.expander("OpenCV Global Motion settings", expanded=True):
+            global_motion_max_features = st.slider("Global motion ORB features", 200, 5000, 2000, 100)
+            global_motion_min_inliers = st.slider("Global motion min inliers", 4, 200, 30, 1)
+            global_motion_ransac_px = st.slider("Global motion RANSAC px", 1.0, 20.0, 5.0, 0.5)
+            global_motion_smoothing = st.slider("Global motion smoothing", 0.0, 0.98, 0.25, 0.05)
+            global_motion_max_translation = st.slider("Max translation/frame px", 5.0, 300.0, 80.0, 5.0)
+            global_motion_max_scale = st.slider("Max scale change/frame", 0.01, 0.60, 0.12, 0.01)
+            global_motion_max_rotation = st.slider("Max rotation/frame deg", 1.0, 45.0, 8.0, 1.0)
+            global_motion_config = GlobalMotionConfig(
+                max_features=int(global_motion_max_features),
+                min_inliers=int(global_motion_min_inliers),
+                ransac_reprojection_px=float(global_motion_ransac_px),
+                smoothing=float(global_motion_smoothing),
+                max_translation_px=float(global_motion_max_translation),
+                max_scale_change=float(global_motion_max_scale),
+                max_rotation_deg=float(global_motion_max_rotation),
+            )
+            st.caption("No point tracker is used. The 3D model follows image motion estimated between frame t and t+1.")
     model_max_side = st.slider("Neural model max side", 256, 1024, 384, 64)
     freeze_lost_points = st.checkbox("Hide lost points and resume when visible", value=True)
     reject_drift_points = st.checkbox("Reject border/jump drift", value=True)
@@ -1155,13 +1279,21 @@ with st.sidebar:
     if reject_drift_points:
         edge_margin_px = st.slider("Reject points within edge px", 0, 120, 32, 1)
         max_jump_px = st.slider("Reject point jumps over px", 0, 300, 50, 5)
+        max_total_drift_px = st.slider("Reject total drift over px", 0, 600, 180, 10)
         content_margin_px = st.slider("Reject points near content edge px", 0, 200, 48, 2)
+        motion_residual_px = st.slider("Reject motion outliers over px", 0, 120, 30, 2)
+        min_visible_points = st.slider("Minimum accepted points", 0, 80, 8, 1)
+        min_visible_fraction = st.slider("Minimum accepted fraction", 0.0, 1.0, 0.15, 0.05)
         track_validation = TrackValidationConfig(
             edge_margin=edge_margin_px,
             max_jump_px=float(max_jump_px),
+            max_total_drift_px=float(max_total_drift_px),
             content_margin=content_margin_px,
+            motion_residual_px=float(motion_residual_px),
+            min_visible_points=int(min_visible_points),
+            min_visible_fraction=float(min_visible_fraction),
         )
-        st.caption("Hides points that stick to frame/content borders or jump too far between frames.")
+        st.caption("Hides points that jump, hit borders/instruments, or disagree with the dominant RANSAC motion.")
     default_instrument_onnx_path = Path("instrument_segmentation/runs/instrument_model/best.onnx")
     avoid_instruments = st.checkbox(
         "Avoid instruments with ONNX mask",
@@ -1382,20 +1514,24 @@ try:
     obj_mesh_count = 0
     obj_overlay_enabled = bool(uploaded_objs)
     use_mouse_obj_placement = False
-    obj_max_points = 80
+    obj_max_points = 50
     obj_edge_fraction = 0.85
+    obj_region_point_count = 80
     obj_anchor_source = "Manual points on model"
     obj_transform_mode = "Locked 2D placement"
     obj_pnp_reprojection_error = 8.0
     obj_pnp_min_inliers = 6
     obj_show_anchor_points = False
     obj_render_style = "Wireframe"
+    obj_render_opacity = 0.5
     obj_motion_smoothing = 0.75
     obj_motion_min_inlier_ratio = 0.35
     obj_motion_strong_inlier_ratio = 0.70
     obj_motion_max_jump_px = 35.0
     obj_motion_max_scale_change = 0.12
     obj_motion_max_rotation_deg = 8.0
+    obj_motion_min_total_scale = 0.55
+    obj_motion_max_total_scale = 1.80
     obj_rotate_x = 0
     obj_rotate_y = 0
     obj_rotate_z = 0
@@ -1563,6 +1699,25 @@ try:
                         1.0,
                         help="Rejects sudden in-plane rotation from noisy points.",
                     )
+                    scale_a, scale_b = st.columns(2)
+                    with scale_a:
+                        obj_motion_min_total_scale = st.slider(
+                            "Min total 3D scale",
+                            0.10,
+                            1.00,
+                            0.55,
+                            0.05,
+                            help="Prevents the stabilized transform from shrinking the OBJ too much over time.",
+                        )
+                    with scale_b:
+                        obj_motion_max_total_scale = st.slider(
+                            "Max total 3D scale",
+                            1.00,
+                            4.00,
+                            1.80,
+                            0.05,
+                            help="Prevents gradual zoom drift from making the OBJ grow without limit.",
+                        )
                 if obj_transform_mode == "PnP":
                     pnp_a, pnp_b = st.columns(2)
                     with pnp_a:
@@ -1583,13 +1738,41 @@ try:
                             1,
                             help="Minimum good anchors required before accepting the PnP pose.",
                         )
+                anchor_source_options = [
+                    "Manual points on model",
+                    "Image motion (no points)",
+                    "Drawn region points",
+                    "Auto sampled OBJ points",
+                ]
                 obj_anchor_source = st.selectbox(
                     "3D anchor source",
-                    ["Manual points on model", "Auto sampled OBJ points"],
-                    help="Manual uses the points you draw as OBJ anchors. Auto samples OBJ vertices for you.",
+                    anchor_source_options,
+                    index=1 if OPENCV_GLOBAL_MOTION_TRACKER in selected_trackers else (2 if add_point_cloud else 0),
+                    help=(
+                        "Manual uses the points you draw as OBJ anchors. "
+                        "Image motion follows frame-to-frame camera/image transform without point tracking. "
+                        "Drawn region points creates uniform 2D anchors inside your polygons. "
+                        "Auto samples visible OBJ vertices."
+                    ),
                 )
+                if obj_anchor_source == "Image motion (no points)":
+                    obj_max_points = st.slider("3D image-motion anchor points", 10, 80, 40, 5)
+                    obj_edge_fraction = st.slider(
+                        "3D image-motion edge ratio",
+                        0.0,
+                        1.0,
+                        0.85,
+                        0.05,
+                        help="Internal OBJ anchors used only to render the 3D model under global image motion.",
+                    )
+                    st.caption("Use with `Tracker -> OpenCV Global Motion`. No user points are tracked.")
+                if obj_anchor_source == "Drawn region points":
+                    obj_region_point_count = st.selectbox("3D region point count", [50, 80, 120, 200], index=1)
+                    st.caption(
+                        "Draw one or more polygons/rectangles on the organ. The app creates uniform 2D anchors inside them."
+                    )
                 if obj_anchor_source == "Auto sampled OBJ points":
-                    obj_max_points = st.slider("3D model tracking points", 20, 3000, 150, 10)
+                    obj_max_points = st.slider("3D model tracking points", 10, 50, 50, 5)
                     obj_edge_fraction = st.slider(
                         "3D edge anchor ratio",
                         0.0,
@@ -1600,13 +1783,23 @@ try:
                     )
                 obj_render_style = st.selectbox(
                     "3D output render style",
-                    ["Wireframe", "50% volume"],
-                    help="Wireframe matches the preview-style cyan mesh. 50% volume fills OBJ faces transparently.",
+                    ["Wireframe", "Transparent volume"],
+                    help="Wireframe shows mesh edges. Transparent volume fills OBJ faces with adjustable opacity.",
                 )
+                if obj_render_style != "Wireframe":
+                    obj_render_opacity = st.slider(
+                        "3D render opacity",
+                        0.05,
+                        0.95,
+                        0.45,
+                        0.05,
+                        help="Lower opacity keeps the surgical image visible; higher opacity makes the 3D anatomy more solid.",
+                    )
                 obj_show_anchor_points = st.checkbox("Show red 3D anchor points in output", value=False)
-                st.caption(
-                    "Manual mode: draw point annotations on the projected OBJ. The nearest OBJ vertices become the 3D anchors."
-                )
+                if obj_anchor_source == "Manual points on model":
+                    st.caption(
+                        "Manual mode: draw point annotations on the projected OBJ. The nearest OBJ vertices become the 3D anchors."
+                    )
             obj_model_points_3d = obj_normalized_vertices @ rotation_matrix_xyz(
                 obj_rotate_x,
                 obj_rotate_y,
@@ -1674,7 +1867,14 @@ try:
 
     canvas_background = frame_rgb
     if obj_overlay_enabled and obj_projected_points is not None:
-        canvas_background = draw_obj_overlay(frame_rgb, obj_projected_points, obj_faces, obj_face_colors)
+        canvas_background = draw_obj_overlay(
+            frame_rgb,
+            obj_projected_points,
+            obj_faces,
+            obj_face_colors,
+            render_style=obj_render_style,
+            render_opacity=obj_render_opacity,
+        )
 
     display_frame, canvas_scale = resize_for_canvas(canvas_background)
     height, width = display_frame.shape[:2]
@@ -1696,6 +1896,18 @@ try:
         )
 
     tracks, labels = parse_annotations(canvas_result.json_data, canvas_scale)
+    drawn_regions = parse_annotation_regions(canvas_result.json_data, canvas_scale)
+    if add_point_cloud and point_cloud_area == "Drawn rect/polygon areas":
+        helper_shape_prefixes = ("rect ", "path ", "polygon ")
+        filtered_tracks_labels = [
+            (track, label)
+            for track, label in zip(tracks, labels)
+            if not label.startswith(helper_shape_prefixes)
+        ]
+        if filtered_tracks_labels:
+            tracks, labels = map(list, zip(*filtered_tracks_labels))
+        else:
+            tracks, labels = [], []
     manual_tracks, manual_labels = tracks, labels
     manual_point_count = sum(len(track) for track in manual_tracks)
     use_manual_obj_anchors = (
@@ -1703,8 +1915,20 @@ try:
         and obj_projected_points is not None
         and obj_anchor_source == "Manual points on model"
     )
-    if use_manual_obj_anchors:
+    use_image_motion_obj_anchors = (
+        obj_overlay_enabled
+        and obj_projected_points is not None
+        and obj_anchor_source == "Image motion (no points)"
+    )
+    use_region_obj_anchors = (
+        obj_overlay_enabled
+        and obj_projected_points is not None
+        and obj_anchor_source == "Drawn region points"
+    )
+    if use_manual_obj_anchors or use_image_motion_obj_anchors or use_region_obj_anchors:
         tracks, labels = [], []
+    obj_anchor_points_3d = np.empty((0, 3), dtype=np.float32)
+    obj_registered_transform_mode = obj_transform_mode
     if obj_overlay_enabled and obj_projected_points is not None:
         if obj_anchor_source == "Manual points on model":
             manual_single_point_count = sum(1 for track in manual_tracks if len(track) == 1)
@@ -1712,6 +1936,7 @@ try:
                 manual_tracks,
                 obj_projected_points,
             )
+            obj_anchor_points_3d = obj_model_points_3d[obj_anchor_indices]
             accepted_anchor_count = len(obj_tracks[0]) if obj_tracks else 0
             if manual_single_point_count > accepted_anchor_count:
                 ignored_count = manual_single_point_count - accepted_anchor_count
@@ -1723,6 +1948,40 @@ try:
                     f"PnP needs at least {max(6, obj_pnp_min_inliers)} accepted manual model points. "
                     "With fewer points, the app uses the 2D fallback."
                 )
+        elif obj_anchor_source == "Image motion (no points)":
+            obj_tracks, obj_labels, obj_anchor_indices = obj_tracks_from_projection(
+                obj_projected_points,
+                obj_faces,
+                frame_width,
+                frame_height,
+                obj_max_points,
+                edge_fraction=obj_edge_fraction,
+            )
+            obj_anchor_points_3d = obj_model_points_3d[obj_anchor_indices]
+            obj_registered_transform_mode = "Similarity"
+            if OPENCV_GLOBAL_MOTION_TRACKER not in selected_trackers:
+                st.warning("`Image motion (no points)` is intended for `Tracker -> OpenCV Global Motion`.")
+        elif obj_anchor_source == "Drawn region points":
+            point_tracks, _ = generate_grid_tracks(
+                frame_width,
+                frame_height,
+                0,
+                grid_margin,
+                obj_region_point_count,
+                drawn_regions,
+            )
+            if not point_tracks:
+                obj_tracks, obj_labels = [], []
+                st.info("Draw at least one polygon or rectangle to create 3D region anchors.")
+            else:
+                region_points = np.concatenate(point_tracks, axis=0).astype(np.float32)
+                obj_tracks = [region_points]
+                obj_labels = ["obj mesh"]
+                obj_anchor_points_3d = np.zeros((len(region_points), 3), dtype=np.float32)
+                if obj_transform_mode == "PnP":
+                    obj_registered_transform_mode = "Stabilized similarity"
+                    st.warning("Drawn region points are 2D image anchors, so PnP is disabled. Using Stabilized similarity.")
+                st.success(f"Created {len(region_points)} 3D region anchors from drawn polygons.")
         else:
             obj_tracks, obj_labels, obj_anchor_indices = obj_tracks_from_projection(
                 obj_projected_points,
@@ -1732,28 +1991,32 @@ try:
                 obj_max_points,
                 edge_fraction=obj_edge_fraction,
             )
+            obj_anchor_points_3d = obj_model_points_3d[obj_anchor_indices]
         obj_track_count = len(obj_tracks)
         if obj_tracks and obj_labels:
             _tracking_methods.register_obj_overlay(
                 obj_labels[0],
                 obj_tracks[0],
                 obj_projected_points,
-                obj_model_points_3d[obj_anchor_indices],
+                obj_anchor_points_3d,
                 obj_model_points_3d,
                 obj_faces,
                 face_colors=obj_face_colors,
-                transform_mode=obj_transform_mode,
+                transform_mode=obj_registered_transform_mode,
                 frame_size=(frame_width, frame_height),
                 pnp_reprojection_error=obj_pnp_reprojection_error,
                 pnp_min_inliers=obj_pnp_min_inliers,
                 show_anchor_points=obj_show_anchor_points,
                 render_style=obj_render_style,
+                render_opacity=obj_render_opacity,
                 motion_smoothing=obj_motion_smoothing,
                 motion_min_inlier_ratio=obj_motion_min_inlier_ratio,
                 motion_strong_inlier_ratio=obj_motion_strong_inlier_ratio,
                 motion_max_jump_px=obj_motion_max_jump_px,
                 motion_max_scale_change=obj_motion_max_scale_change,
                 motion_max_rotation_deg=obj_motion_max_rotation_deg,
+                motion_min_total_scale=obj_motion_min_total_scale,
+                motion_max_total_scale=obj_motion_max_total_scale,
             )
         tracks.extend(obj_tracks)
         labels.extend(obj_labels)
@@ -1762,7 +2025,7 @@ try:
         frame_height, frame_width = frame_rgb.shape[:2]
         point_cloud_regions = None
         if point_cloud_area == "Drawn rect/polygon areas":
-            point_cloud_regions = parse_annotation_regions(canvas_result.json_data, canvas_scale)
+            point_cloud_regions = drawn_regions
             if not point_cloud_regions:
                 st.warning("Draw at least one rectangle or polygon to place the point cloud inside it.")
         if point_cloud_area == "Drawn rect/polygon areas" and not point_cloud_regions:
@@ -1852,6 +2115,9 @@ try:
             st.info(external_tracker_setup_instructions(tracker_name))
 
     can_start = bool(tracks) and (not compare_mode or len(selected_trackers) >= 2)
+    if not can_start:
+        if not tracks:
+            st.warning("Tracking is disabled until there is at least one point, region, point cloud, or 3D helper point to track.")
     if (
         can_start
         and enable_gpu_local_neural
@@ -1936,6 +2202,7 @@ try:
                         freeze_lost_points,
                         instrument_avoidance,
                         track_validation,
+                        global_motion_config,
                     )
                 except RuntimeError as error:
                     error_message = format_tracker_error(error)
@@ -2081,6 +2348,7 @@ try:
                     freeze_lost_points,
                     instrument_avoidance,
                     track_validation,
+                    global_motion_config,
                 )
             except RuntimeError as error:
                 error_message = format_tracker_error(error)
