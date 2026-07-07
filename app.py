@@ -92,6 +92,8 @@ TEMP_DIR = Path(tempfile.gettempdir()) / "surgical_video_tracker"
 UPLOAD_DIR = TEMP_DIR / "uploads"
 OUTPUT_DIR = TEMP_DIR / "output"
 MAX_CANVAS_WIDTH = 900
+DEFAULT_OBJ_ROTATION = (-40, 20, -15)
+DEFAULT_OBJ_SCALE_FRACTION = 0.19
 TRACKER_OPTIONS = [
     OPENCV_TRACKER,
     OPENCV_GLOBAL_MOTION_TRACKER,
@@ -472,8 +474,12 @@ def obj_tracks_from_manual_points(
     return [np.asarray(anchors, dtype=np.float32)], ["obj mesh"], np.asarray(anchor_indices, dtype=np.int32)
 
 
+def default_obj_scale_px(frame_width: int, frame_height: int) -> float:
+    return max(40.0, min(frame_width, frame_height) * DEFAULT_OBJ_SCALE_FRACTION)
+
+
 def obj_control_box_drawing(width: int, height: int) -> dict[str, Any]:
-    box_size = max(60, min(width, height) // 3)
+    box_size = max(60, int(min(width, height) * DEFAULT_OBJ_SCALE_FRACTION * 2.0))
     return {
         "version": "4.4.0",
         "objects": [
@@ -501,7 +507,7 @@ def obj_placement_from_canvas(
     frame_width: int,
     frame_height: int,
 ) -> tuple[float, float, float]:
-    default_scale = max(40.0, min(frame_width, frame_height) / 4.0)
+    default_scale = default_obj_scale_px(frame_width, frame_height)
     if not json_data:
         return frame_width / 2.0, frame_height / 2.0, default_scale
     for obj in json_data.get("objects", []):
@@ -1532,9 +1538,7 @@ try:
     obj_motion_max_rotation_deg = 8.0
     obj_motion_min_total_scale = 0.55
     obj_motion_max_total_scale = 1.80
-    obj_rotate_x = 0
-    obj_rotate_y = 0
-    obj_rotate_z = 0
+    obj_rotate_x, obj_rotate_y, obj_rotate_z = DEFAULT_OBJ_ROTATION
     obj_model_points_3d = np.empty((0, 3), dtype=np.float32)
     obj_vertices = np.empty((0, 3), dtype=np.float32)
     obj_normalized_vertices = np.empty((0, 3), dtype=np.float32)
@@ -1618,21 +1622,21 @@ try:
                             "3D model scale px",
                             10,
                             max(20, max(frame_width, frame_height)),
-                            max(40, min(frame_width, frame_height) // 4),
+                            int(default_obj_scale_px(frame_width, frame_height)),
                             5,
                         )
                 else:
                     obj_center_x = frame_width / 2
                     obj_center_y = frame_height / 2
-                    obj_scale = max(40, min(frame_width, frame_height) // 4)
+                    obj_scale = default_obj_scale_px(frame_width, frame_height)
                 if not use_mouse_obj_placement:
                     rot_a, rot_b, rot_c = st.columns(3)
                     with rot_a:
-                        obj_rotate_x = st.slider("Rotate X", -180, 180, 0, 1)
+                        obj_rotate_x = st.slider("Rotate X", -180, 180, DEFAULT_OBJ_ROTATION[0], 1)
                     with rot_b:
-                        obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1)
+                        obj_rotate_y = st.slider("Rotate Y", -180, 180, DEFAULT_OBJ_ROTATION[1], 1)
                     with rot_c:
-                        obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1)
+                        obj_rotate_z = st.slider("Rotate Z", -180, 180, DEFAULT_OBJ_ROTATION[2], 1)
                 else:
                     st.caption("Use the placement panel below to rotate the model and move/resize the blue box.")
                 obj_transform_mode = st.selectbox(
@@ -1823,11 +1827,32 @@ try:
             st.subheader("Place 3D model")
             rot_a, rot_b, rot_c = st.columns(3)
             with rot_a:
-                obj_rotate_x = st.slider("Rotate X", -180, 180, 0, 1, key=f"obj_mouse_rx_{obj_upload_key}")
+                obj_rotate_x = st.slider(
+                    "Rotate X",
+                    -180,
+                    180,
+                    DEFAULT_OBJ_ROTATION[0],
+                    1,
+                    key=f"obj_mouse_rx_{obj_upload_key}",
+                )
             with rot_b:
-                obj_rotate_y = st.slider("Rotate Y", -180, 180, 0, 1, key=f"obj_mouse_ry_{obj_upload_key}")
+                obj_rotate_y = st.slider(
+                    "Rotate Y",
+                    -180,
+                    180,
+                    DEFAULT_OBJ_ROTATION[1],
+                    1,
+                    key=f"obj_mouse_ry_{obj_upload_key}",
+                )
             with rot_c:
-                obj_rotate_z = st.slider("Rotate Z", -180, 180, 0, 1, key=f"obj_mouse_rz_{obj_upload_key}")
+                obj_rotate_z = st.slider(
+                    "Rotate Z",
+                    -180,
+                    180,
+                    DEFAULT_OBJ_ROTATION[2],
+                    1,
+                    key=f"obj_mouse_rz_{obj_upload_key}",
+                )
 
             obj_model_points_3d = obj_normalized_vertices @ rotation_matrix_xyz(
                 obj_rotate_x,
