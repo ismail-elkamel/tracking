@@ -66,10 +66,6 @@ class GlobalMotionConfig:
     max_translation_px: float = 80.0
     max_scale_change: float = 0.12
     max_rotation_deg: float = 8.0
-    estimate_3d_tilt: bool = False
-    tilt_smoothing: float = 0.85
-    max_tilt_deg: float = 18.0
-    max_tilt_update_deg: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -103,7 +99,6 @@ class ObjOverlayMetadata:
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
 OBJ_PNP_POSE_CACHE: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 OBJ_2D_TRANSFORM_CACHE: dict[str, np.ndarray] = {}
-OBJ_RUNTIME_POINT_OVERRIDES: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
 
 def obj_edges_from_faces(
@@ -599,31 +594,6 @@ def obj_camera_matrix(metadata: ObjOverlayMetadata) -> np.ndarray:
     )
 
 
-def rotation_matrix_to_euler_xyz(rotation: np.ndarray) -> tuple[float, float, float]:
-    sy = float(np.sqrt(rotation[0, 0] * rotation[0, 0] + rotation[1, 0] * rotation[1, 0]))
-    singular = sy < 1e-6
-    if not singular:
-        x = float(np.arctan2(rotation[2, 1], rotation[2, 2]))
-        y = float(np.arctan2(-rotation[2, 0], sy))
-        z = float(np.arctan2(rotation[1, 0], rotation[0, 0]))
-    else:
-        x = float(np.arctan2(-rotation[1, 2], rotation[1, 1]))
-        y = float(np.arctan2(-rotation[2, 0], sy))
-        z = 0.0
-    return tuple(float(np.degrees(value)) for value in (x, y, z))
-
-
-def euler_xyz_to_rotation_matrix(rx_deg: float, ry_deg: float, rz_deg: float) -> np.ndarray:
-    rx, ry, rz = (np.radians(float(value)) for value in (rx_deg, ry_deg, rz_deg))
-    cx, sx = float(np.cos(rx)), float(np.sin(rx))
-    cy, sy = float(np.cos(ry)), float(np.sin(ry))
-    cz, sz = float(np.cos(rz)), float(np.sin(rz))
-    rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float32)
-    rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float32)
-    rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
-    return (rot_z @ rot_y @ rot_x).astype(np.float32)
-
-
 def estimate_obj_pnp_pose(
     metadata: ObjOverlayMetadata,
     tracked_points: np.ndarray,
@@ -761,10 +731,7 @@ def draw_obj_mesh(
 ) -> np.ndarray:
     base_frame = output.copy()
     metadata = OBJ_OVERLAYS.get(label)
-    override = OBJ_RUNTIME_POINT_OVERRIDES.get(label)
-    if override is not None:
-        points, anchor_points = override
-    elif metadata is not None and metadata.transform_mode == "Stabilized similarity":
+    if metadata is not None and metadata.transform_mode == "Stabilized similarity":
         transform = estimate_stabilized_obj_transform(label, tracked_points)
         points = apply_obj_transform(metadata.model_points, transform)
         anchor_points = apply_obj_transform(metadata.anchor_points, transform)
@@ -2154,80 +2121,6 @@ def estimate_global_motion_transform(
     return transform.astype(np.float32), len(good_matches), inlier_count
 
 
-def estimate_global_homography_rotation(
-    previous_gray: np.ndarray,
-    next_gray: np.ndarray,
-    metadata: ObjOverlayMetadata,
-    config: GlobalMotionConfig,
-) -> tuple[np.ndarray | None, int, int]:
-    orb = cv2.ORB_create(
-        nfeatures=max(200, int(config.max_features)),
-        scaleFactor=1.2,
-        nlevels=8,
-        fastThreshold=12,
-    )
-    previous_keypoints, previous_desc = orb.detectAndCompute(previous_gray, None)
-    next_keypoints, next_desc = orb.detectAndCompute(next_gray, None)
-    if previous_desc is None or next_desc is None:
-        return None, 0, 0
-    if len(previous_keypoints) < 4 or len(next_keypoints) < 4:
-        return None, 0, 0
-
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
-    raw_matches = matcher.knnMatch(previous_desc, next_desc, k=2)
-    good_matches = []
-    for pair in raw_matches:
-        if len(pair) < 2:
-            continue
-        first, second = pair
-        if first.distance < 0.75 * second.distance:
-            good_matches.append(first)
-    if len(good_matches) < 4:
-        return None, len(good_matches), 0
-
-    source = np.float32([previous_keypoints[match.queryIdx].pt for match in good_matches])
-    target = np.float32([next_keypoints[match.trainIdx].pt for match in good_matches])
-    homography, inliers = cv2.findHomography(
-        source,
-        target,
-        cv2.RANSAC,
-        float(config.ransac_reprojection_px),
-    )
-    inlier_count = int(inliers.sum()) if inliers is not None else 0
-    if homography is None or not np.isfinite(homography).all():
-        return None, len(good_matches), inlier_count
-    if inlier_count < int(config.min_inliers):
-        return None, len(good_matches), inlier_count
-
-    try:
-        _, rotations, _, _ = cv2.decomposeHomographyMat(
-            homography.astype(np.float64),
-            obj_camera_matrix(metadata).astype(np.float64),
-        )
-    except cv2.error:
-        return None, len(good_matches), inlier_count
-    if not rotations:
-        return None, len(good_matches), inlier_count
-
-    valid_rotations = [
-        rotation
-        for rotation in rotations
-        if np.isfinite(rotation).all() and np.linalg.det(rotation) > 0.0
-    ]
-    if not valid_rotations:
-        valid_rotations = [rotation for rotation in rotations if np.isfinite(rotation).all()]
-    if not valid_rotations:
-        return None, len(good_matches), inlier_count
-
-    rotation = min(
-        valid_rotations,
-        key=lambda candidate: abs(
-            float(np.arccos(np.clip((np.trace(candidate) - 1.0) / 2.0, -1.0, 1.0)))
-        ),
-    )
-    return rotation.astype(np.float32), len(good_matches), inlier_count
-
-
 def acceptable_global_motion(transform: np.ndarray, inlier_count: int, config: GlobalMotionConfig) -> bool:
     if inlier_count < int(config.min_inliers):
         return False
@@ -2245,83 +2138,6 @@ def smooth_incremental_transform(transform: np.ndarray, smoothing: float) -> np.
     smoothing = float(np.clip(smoothing, 0.0, 0.98))
     identity = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
     return (identity * smoothing + transform.astype(np.float32) * (1.0 - smoothing)).astype(np.float32)
-
-
-def update_cumulative_tilt_rotation(
-    cumulative_rotation: np.ndarray,
-    detected_rotation: np.ndarray | None,
-    config: GlobalMotionConfig,
-) -> np.ndarray:
-    if detected_rotation is None:
-        return cumulative_rotation
-
-    rx, ry, _ = rotation_matrix_to_euler_xyz(detected_rotation)
-    max_update = max(0.0, float(config.max_tilt_update_deg))
-    if max_update <= 0.0:
-        return cumulative_rotation
-
-    smoothing = float(np.clip(config.tilt_smoothing, 0.0, 0.98))
-    update_weight = 1.0 - smoothing
-    rx = float(np.clip(rx, -max_update, max_update)) * update_weight
-    ry = float(np.clip(ry, -max_update, max_update)) * update_weight
-    incremental_rotation = euler_xyz_to_rotation_matrix(rx, ry, 0.0)
-    updated = incremental_rotation @ cumulative_rotation
-
-    total_rx, total_ry, _ = rotation_matrix_to_euler_xyz(updated)
-    max_total = max(0.0, float(config.max_tilt_deg))
-    total_rx = float(np.clip(total_rx, -max_total, max_total))
-    total_ry = float(np.clip(total_ry, -max_total, max_total))
-    return euler_xyz_to_rotation_matrix(total_rx, total_ry, 0.0)
-
-
-def project_obj_with_global_tilt(
-    metadata: ObjOverlayMetadata,
-    cumulative_transform: np.ndarray,
-    cumulative_rotation: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    transform = homogeneous_to_affine(cumulative_transform)
-    center = np.mean(metadata.model_points.astype(np.float32), axis=0, keepdims=True)
-    center = apply_obj_transform(center, transform)[0]
-
-    linear = transform[:, :2].astype(np.float32)
-    scale_multiplier = float(np.sqrt(max(abs(np.linalg.det(linear)), 1e-6)))
-    image_rotation = linear / max(scale_multiplier, 1e-6)
-    source_extent = float(np.ptp(metadata.model_points_3d[:, :2], axis=0).max())
-    image_extent = float(np.ptp(metadata.model_points, axis=0).max())
-    base_scale = image_extent / max(source_extent, 1e-6)
-    scale = max(1.0, base_scale * scale_multiplier)
-
-    rotated_model = metadata.model_points_3d @ cumulative_rotation.T
-    rotated_anchors = metadata.anchor_points_3d @ cumulative_rotation.T
-    model_offsets = np.empty((len(rotated_model), 2), dtype=np.float32)
-    anchor_offsets = np.empty((len(rotated_anchors), 2), dtype=np.float32)
-    model_offsets[:, 0] = rotated_model[:, 0] * scale
-    model_offsets[:, 1] = -rotated_model[:, 1] * scale
-    anchor_offsets[:, 0] = rotated_anchors[:, 0] * scale
-    anchor_offsets[:, 1] = -rotated_anchors[:, 1] * scale
-
-    model_points = center + (model_offsets @ image_rotation.T)
-    anchor_points = center + (anchor_offsets @ image_rotation.T)
-    return model_points, anchor_points
-
-
-def set_global_tilt_overrides(
-    labels: list[str],
-    cumulative_transform: np.ndarray,
-    cumulative_rotation: np.ndarray,
-) -> None:
-    OBJ_RUNTIME_POINT_OVERRIDES.clear()
-    for label in labels:
-        if not label.startswith("obj "):
-            continue
-        metadata = OBJ_OVERLAYS.get(label)
-        if metadata is None:
-            continue
-        OBJ_RUNTIME_POINT_OVERRIDES[label] = project_obj_with_global_tilt(
-            metadata,
-            cumulative_transform,
-            cumulative_rotation,
-        )
 
 
 def transform_groups_with_global_motion(
@@ -2366,20 +2182,11 @@ def track_with_global_motion(
     saved_path = Path(output_path) if output_path else None
     start_time = time.perf_counter()
     cumulative_transform = np.eye(3, dtype=np.float32)
-    cumulative_tilt_rotation = np.eye(3, dtype=np.float32)
     initial_tracks = [track.copy().astype(np.float32) for track in tracks]
-    tilt_metadata = None
-    for label in labels:
-        if label.startswith("obj "):
-            tilt_metadata = OBJ_OVERLAYS.get(label)
-            if tilt_metadata is not None:
-                break
     frames_written = 0
 
     try:
         instrument_mask = predict_instrument_mask(previous_rgb, instrument_avoidance)
-        if config.estimate_3d_tilt:
-            set_global_tilt_overrides(labels, cumulative_transform, cumulative_tilt_rotation)
         emit_tracked_frame(
             previous_rgb,
             transform_groups_with_global_motion(initial_tracks, cumulative_transform),
@@ -2389,7 +2196,6 @@ def track_with_global_motion(
             frame_placeholder,
             instrument_mask,
         )
-        OBJ_RUNTIME_POINT_OVERRIDES.clear()
         frames_written += 1
 
         for absolute_frame in range(start_frame + 1, end_frame + 1):
@@ -2406,30 +2212,12 @@ def track_with_global_motion(
             )
             accepted = transform is not None and acceptable_global_motion(transform, inlier_count, config)
             motion_text = "no transform"
-            tilt_text = ""
             if accepted:
                 transform = smooth_incremental_transform(transform, float(config.smoothing))
                 scale, angle = transform_scale_angle(transform)
                 dx, dy = transform[:, 2]
                 motion_text = f"dx={dx:+.1f} dy={dy:+.1f} scale={scale:.3f} rot={angle:+.1f}deg"
                 cumulative_transform = affine_to_homogeneous(transform) @ cumulative_transform
-                if config.estimate_3d_tilt and tilt_metadata is not None:
-                    tilt_rotation, _, tilt_inliers = estimate_global_homography_rotation(
-                        previous_gray,
-                        next_gray,
-                        tilt_metadata,
-                        config,
-                    )
-                    cumulative_tilt_rotation = update_cumulative_tilt_rotation(
-                        cumulative_tilt_rotation,
-                        tilt_rotation,
-                        config,
-                    )
-                    tilt_rx, tilt_ry, _ = rotation_matrix_to_euler_xyz(cumulative_tilt_rotation)
-                    if tilt_rotation is None:
-                        tilt_text = f", tilt frozen ({tilt_inliers} H inliers)"
-                    else:
-                        tilt_text = f", tilt rx={tilt_rx:+.1f} ry={tilt_ry:+.1f} ({tilt_inliers} H inliers)"
             elif transform is not None:
                 scale, angle = transform_scale_angle(transform)
                 dx, dy = transform[:, 2]
@@ -2437,8 +2225,6 @@ def track_with_global_motion(
 
             instrument_mask = predict_instrument_mask(next_rgb, instrument_avoidance)
             grouped_tracks = transform_groups_with_global_motion(initial_tracks, cumulative_transform)
-            if config.estimate_3d_tilt:
-                set_global_tilt_overrides(labels, cumulative_transform, cumulative_tilt_rotation)
             emit_tracked_frame(
                 next_rgb,
                 grouped_tracks,
@@ -2448,18 +2234,16 @@ def track_with_global_motion(
                 frame_placeholder,
                 instrument_mask,
             )
-            OBJ_RUNTIME_POINT_OVERRIDES.clear()
             frames_written += 1
             state = "accepted" if accepted else "frozen"
             status_placeholder.caption(
                 f"Global motion frame {absolute_frame} / {end_frame}: {state}, "
-                f"{inlier_count}/{match_count} inliers, {motion_text}{tilt_text}"
+                f"{inlier_count}/{match_count} inliers, {motion_text}"
             )
             if show_live_preview:
                 sync_to_video_clock(start_time, absolute_frame - start_frame, fps)
             previous_gray = next_gray
     finally:
-        OBJ_RUNTIME_POINT_OVERRIDES.clear()
         cap.release()
         if output_writer is not None:
             output_writer.release()
