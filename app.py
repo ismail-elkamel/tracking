@@ -1268,6 +1268,46 @@ with st.sidebar:
             global_motion_max_translation = st.slider("Max translation/frame px", 5.0, 300.0, 80.0, 5.0)
             global_motion_max_scale = st.slider("Max scale change/frame", 0.01, 0.60, 0.12, 0.01)
             global_motion_max_rotation = st.slider("Max rotation/frame deg", 1.0, 45.0, 8.0, 1.0)
+            estimate_3d_tilt = st.checkbox(
+                "Estimate 3D X/Y tilt from homography",
+                value=False,
+                help=(
+                    "No manual points are needed. OpenCV decomposes a frame-to-frame homography to estimate "
+                    "an approximate camera tilt, then applies only X/Y rotation to the 3D overlay."
+                ),
+            )
+            tilt_smoothing = 0.85
+            max_tilt_deg = 18.0
+            max_tilt_update_deg = 3.0
+            if estimate_3d_tilt:
+                tilt_a, tilt_b, tilt_c = st.columns(3)
+                with tilt_a:
+                    tilt_smoothing = st.slider(
+                        "3D tilt smoothing",
+                        0.0,
+                        0.98,
+                        0.85,
+                        0.05,
+                        help="Higher values reduce X/Y rotation jitter but follow real tilt more slowly.",
+                    )
+                with tilt_b:
+                    max_tilt_deg = st.slider(
+                        "Max total X/Y tilt deg",
+                        1.0,
+                        45.0,
+                        18.0,
+                        1.0,
+                        help="Hard limit for the accumulated X/Y rotation added by homography.",
+                    )
+                with tilt_c:
+                    max_tilt_update_deg = st.slider(
+                        "Max X/Y tilt update/frame deg",
+                        0.5,
+                        12.0,
+                        3.0,
+                        0.5,
+                        help="Rejects sudden one-frame X/Y tilt jumps.",
+                    )
             global_motion_config = GlobalMotionConfig(
                 max_features=int(global_motion_max_features),
                 min_inliers=int(global_motion_min_inliers),
@@ -1276,8 +1316,15 @@ with st.sidebar:
                 max_translation_px=float(global_motion_max_translation),
                 max_scale_change=float(global_motion_max_scale),
                 max_rotation_deg=float(global_motion_max_rotation),
+                estimate_3d_tilt=bool(estimate_3d_tilt),
+                tilt_smoothing=float(tilt_smoothing),
+                max_tilt_deg=float(max_tilt_deg),
+                max_tilt_update_deg=float(max_tilt_update_deg),
             )
-            st.caption("No point tracker is used. The 3D model follows image motion estimated between frame t and t+1.")
+            st.caption(
+                "No point tracker is used. The 3D model follows image motion estimated between frame t and t+1. "
+                "The optional X/Y tilt is homography-based and approximate."
+            )
     model_max_side = st.slider("Neural model max side", 256, 1024, 384, 64)
     freeze_lost_points = st.checkbox("Hide lost points and resume when visible", value=True)
     reject_drift_points = st.checkbox("Reject border/jump drift", value=True)
