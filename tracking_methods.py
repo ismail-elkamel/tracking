@@ -73,6 +73,9 @@ class GlobalMotionConfig:
     homography_smoothing: float = 0.85
     homography_max_xy_change_deg: float = 4.0
     homography_max_total_xy_deg: float = 35.0
+    homography_point_source: str = "ORB matches"
+    homography_center_fraction: float = 0.35
+    homography_point_search_radius_px: int = 80
 
 
 @dataclass(frozen=True)
@@ -2229,6 +2232,22 @@ def estimate_homography_xy_rotation_from_matches(
     ):
         return None, match_count, inlier_count, f"H rejected {inlier_count}/{match_count}"
 
+    return decompose_homography_xy_rotation(
+        homography,
+        match_count,
+        inlier_count,
+        frame_shape,
+        prefix="H",
+    )
+
+
+def decompose_homography_xy_rotation(
+    homography: np.ndarray,
+    match_count: int,
+    inlier_count: int,
+    frame_shape: tuple[int, int],
+    prefix: str = "H",
+) -> tuple[tuple[float, float] | None, int, int, str]:
     height, width = frame_shape
     try:
         _, rotations, _, _ = cv2.decomposeHomographyMat(
@@ -2236,10 +2255,10 @@ def estimate_homography_xy_rotation_from_matches(
             image_camera_matrix(width, height),
         )
     except cv2.error:
-        return None, match_count, inlier_count, f"H decomposition failed {inlier_count}/{match_count}"
+        return None, match_count, inlier_count, f"{prefix} decomposition failed {inlier_count}/{match_count}"
 
     if not rotations:
-        return None, match_count, inlier_count, f"H no rotations {inlier_count}/{match_count}"
+        return None, match_count, inlier_count, f"{prefix} no rotations {inlier_count}/{match_count}"
 
     valid_rotations = [rotation for rotation in rotations if np.linalg.det(rotation) > 0]
     if not valid_rotations:
@@ -2255,8 +2274,145 @@ def estimate_homography_xy_rotation_from_matches(
         (float(rotate_x), float(rotate_y)),
         match_count,
         inlier_count,
-        f"H rx={rotate_x:+.1f} ry={rotate_y:+.1f} {inlier_count}/{match_count}",
+        f"{prefix} rx={rotate_x:+.1f} ry={rotate_y:+.1f} {inlier_count}/{match_count}",
     )
+
+
+def central_homography_target_points(
+    frame_shape: tuple[int, int],
+    config: GlobalMotionConfig,
+) -> np.ndarray:
+    height, width = frame_shape
+    fraction = float(np.clip(config.homography_center_fraction, 0.12, 0.85))
+    half_width = width * fraction * 0.5
+    half_height = height * fraction * 0.5
+    center_x = width * 0.5
+    center_y = height * 0.5
+    return np.array(
+        [
+            [center_x - half_width, center_y - half_height],
+            [center_x + half_width, center_y - half_height],
+            [center_x + half_width, center_y + half_height],
+            [center_x - half_width, center_y + half_height],
+        ],
+        dtype=np.float32,
+    )
+
+
+def local_clear_feature_point(
+    gray: np.ndarray,
+    target: np.ndarray,
+    instrument_mask: np.ndarray | None,
+    search_radius: int,
+) -> np.ndarray | None:
+    height, width = gray.shape[:2]
+    x, y = float(target[0]), float(target[1])
+    radius = max(8, int(search_radius))
+    x0 = max(0, int(round(x)) - radius)
+    x1 = min(width, int(round(x)) + radius + 1)
+    y0 = max(0, int(round(y)) - radius)
+    y1 = min(height, int(round(y)) + radius + 1)
+    if x0 >= x1 or y0 >= y1:
+        return None
+
+    roi = gray[y0:y1, x0:x1]
+    roi_mask = (roi > 12).astype(np.uint8) * 255
+    if instrument_mask is not None:
+        local_instrument = instrument_mask[y0:y1, x0:x1].astype(bool, copy=False)
+        roi_mask[local_instrument] = 0
+    if int(np.count_nonzero(roi_mask)) == 0:
+        return None
+
+    corners = cv2.goodFeaturesToTrack(
+        roi,
+        maxCorners=20,
+        qualityLevel=0.01,
+        minDistance=8,
+        mask=roi_mask,
+        blockSize=5,
+    )
+    if corners is not None and len(corners):
+        points = corners.reshape(-1, 2).astype(np.float32)
+        points[:, 0] += float(x0)
+        points[:, 1] += float(y0)
+        distances = np.linalg.norm(points - target.astype(np.float32), axis=1)
+        return points[int(np.argmin(distances))]
+
+    clear_pixels = np.argwhere(roi_mask > 0)
+    if len(clear_pixels) == 0:
+        return None
+    clear_points = np.column_stack([clear_pixels[:, 1] + x0, clear_pixels[:, 0] + y0]).astype(np.float32)
+    distances = np.linalg.norm(clear_points - target.astype(np.float32), axis=1)
+    return clear_points[int(np.argmin(distances))]
+
+
+def select_central_homography_points(
+    gray: np.ndarray,
+    instrument_mask: np.ndarray | None,
+    config: GlobalMotionConfig,
+) -> np.ndarray | None:
+    targets = central_homography_target_points(gray.shape[:2], config)
+    points = []
+    for target in targets:
+        point = local_clear_feature_point(
+            gray,
+            target,
+            instrument_mask,
+            int(config.homography_point_search_radius_px),
+        )
+        if point is None:
+            return None
+        points.append(point)
+    return np.asarray(points, dtype=np.float32)
+
+
+def estimate_homography_xy_rotation_from_central_points(
+    previous_gray: np.ndarray,
+    next_gray: np.ndarray,
+    previous_points: np.ndarray | None,
+    previous_instrument_mask: np.ndarray | None,
+    next_instrument_mask: np.ndarray | None,
+    config: GlobalMotionConfig,
+) -> tuple[tuple[float, float] | None, np.ndarray | None, int, int, str]:
+    if previous_points is None or len(previous_points) != 4:
+        previous_points = select_central_homography_points(previous_gray, previous_instrument_mask, config)
+    if previous_points is None or len(previous_points) != 4:
+        return None, None, 0, 0, "H4 no clear central points"
+
+    next_points, status, _ = cv2.calcOpticalFlowPyrLK(
+        previous_gray,
+        next_gray,
+        previous_points.reshape(-1, 1, 2),
+        None,
+        winSize=(31, 31),
+        maxLevel=3,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+    )
+    if next_points is None or status is None:
+        return None, None, 4, 0, "H4 LK failed"
+
+    source = previous_points.astype(np.float32)
+    target = next_points.reshape(-1, 2).astype(np.float32)
+    valid = status.reshape(-1).astype(bool)
+    valid &= np.isfinite(source).all(axis=1) & np.isfinite(target).all(axis=1)
+    valid &= points_outside_instrument(source, previous_instrument_mask)
+    valid &= points_outside_instrument(target, next_instrument_mask)
+    if int(valid.sum()) < 4:
+        reseeded = select_central_homography_points(next_gray, next_instrument_mask, config)
+        return None, reseeded, 4, int(valid.sum()), f"H4 rejected {int(valid.sum())}/4"
+
+    homography = cv2.getPerspectiveTransform(source.astype(np.float32), target.astype(np.float32))
+    if homography is None or not np.isfinite(homography).all():
+        return None, target, 4, 0, "H4 transform failed"
+
+    rotation, _, _, text = decompose_homography_xy_rotation(
+        homography,
+        4,
+        4,
+        next_gray.shape[:2],
+        prefix="H4",
+    )
+    return rotation, target, 4, 4, text
 
 
 def acceptable_global_motion(transform: np.ndarray, inlier_count: int, config: GlobalMotionConfig) -> bool:
@@ -2471,12 +2627,20 @@ def track_with_global_motion(
     start_time = time.perf_counter()
     cumulative_transform = np.eye(3, dtype=np.float32)
     homography_xy_rotation = (0.0, 0.0)
+    central_homography_points: np.ndarray | None = None
     initial_tracks = [track.copy().astype(np.float32) for track in tracks]
     frames_written = 0
     total_relative_frames = max(1, int(end_frame) - int(start_frame))
 
     try:
         instrument_mask = predict_instrument_mask(previous_rgb, instrument_avoidance)
+        previous_instrument_mask = instrument_mask
+        if config.homography_point_source == "Central 4 points":
+            central_homography_points = select_central_homography_points(
+                previous_gray,
+                previous_instrument_mask,
+                config,
+            )
         active_xy_rotation = set_global_rotation_overrides(
             labels,
             cumulative_transform,
@@ -2500,6 +2664,7 @@ def track_with_global_motion(
 
             next_gray = cv2.cvtColor(next_bgr, cv2.COLOR_BGR2GRAY)
             next_rgb = cv2.cvtColor(next_bgr, cv2.COLOR_BGR2RGB)
+            next_instrument_mask = predict_instrument_mask(next_rgb, instrument_avoidance)
             source_points, target_points, match_count = match_global_motion_features(
                 previous_gray,
                 next_gray,
@@ -2526,15 +2691,32 @@ def track_with_global_motion(
 
             homography_text = ""
             if config.xy_rotation_source in {"Homography X/Y", "Homography X/Y + manual keyframes"}:
-                observed_xy_rotation, _, homography_inliers, homography_text = (
-                    estimate_homography_xy_rotation_from_matches(
-                        source_points,
-                        target_points,
-                        match_count,
-                        next_gray.shape[:2],
+                if config.homography_point_source == "Central 4 points":
+                    (
+                        observed_xy_rotation,
+                        central_homography_points,
+                        homography_match_count,
+                        homography_inliers,
+                        homography_text,
+                    ) = estimate_homography_xy_rotation_from_central_points(
+                        previous_gray,
+                        next_gray,
+                        central_homography_points,
+                        previous_instrument_mask,
+                        next_instrument_mask,
                         config,
                     )
-                )
+                else:
+                    observed_xy_rotation, homography_match_count, homography_inliers, homography_text = (
+                        estimate_homography_xy_rotation_from_matches(
+                            source_points,
+                            target_points,
+                            match_count,
+                            next_gray.shape[:2],
+                            config,
+                        )
+                    )
+                    homography_match_count = match_count
                 homography_xy_rotation, homography_accepted = update_homography_xy_rotation(
                     homography_xy_rotation,
                     observed_xy_rotation,
@@ -2546,9 +2728,9 @@ def track_with_global_motion(
                         f"ry={homography_xy_rotation[1]:+.1f}"
                     )
                 elif not homography_text:
-                    homography_text = f"H frozen {homography_inliers}/{match_count}"
+                    homography_text = f"H frozen {homography_inliers}/{homography_match_count}"
 
-            instrument_mask = predict_instrument_mask(next_rgb, instrument_avoidance)
+            instrument_mask = next_instrument_mask
             grouped_tracks = transform_groups_with_global_motion(initial_tracks, cumulative_transform)
             clip_position = float(absolute_frame - start_frame) / float(total_relative_frames)
             active_xy_rotation = set_global_rotation_overrides(
@@ -2580,6 +2762,7 @@ def track_with_global_motion(
             if show_live_preview:
                 sync_to_video_clock(start_time, absolute_frame - start_frame, fps)
             previous_gray = next_gray
+            previous_instrument_mask = next_instrument_mask
     finally:
         OBJ_RUNTIME_POINT_OVERRIDES.clear()
         cap.release()

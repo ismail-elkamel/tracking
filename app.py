@@ -1351,16 +1351,38 @@ with st.sidebar:
             homography_smoothing = 0.85
             homography_max_xy_change = 4.0
             homography_max_total_xy = 35.0
+            homography_point_source = "ORB matches"
+            homography_center_fraction = 0.35
+            homography_point_search_radius = 80
             if xy_rotation_source in {"Homography X/Y", "Homography X/Y + manual keyframes"}:
                 st.caption("Homography estimates only X/Y tilt. Translation, zoom, and Z still come from affine global motion.")
+                homography_point_source = st.selectbox(
+                    "Homography point source",
+                    ["ORB matches", "Central 4 points"],
+                    index=1,
+                    help=(
+                        "`Central 4 points` automatically picks four central visual points and ignores instrument pixels "
+                        "when instrument avoidance is enabled."
+                    ),
+                )
                 homography_col_a, homography_col_b = st.columns(2)
                 with homography_col_a:
-                    homography_min_inliers = st.slider("Homography min inliers", 10, 300, 60, 5)
                     homography_smoothing = st.slider("Homography X/Y smoothing", 0.0, 0.98, 0.85, 0.05)
                     homography_max_total_xy = st.slider("Max total X/Y deg", 5.0, 70.0, 35.0, 1.0)
                 with homography_col_b:
-                    homography_min_inlier_ratio = st.slider("Homography min inlier ratio", 0.05, 0.90, 0.35, 0.05)
                     homography_max_xy_change = st.slider("Max X/Y change/frame deg", 0.2, 12.0, 4.0, 0.2)
+                if homography_point_source == "ORB matches":
+                    homography_col_c, homography_col_d = st.columns(2)
+                    with homography_col_c:
+                        homography_min_inliers = st.slider("Homography min inliers", 10, 300, 60, 5)
+                    with homography_col_d:
+                        homography_min_inlier_ratio = st.slider("Homography min inlier ratio", 0.05, 0.90, 0.35, 0.05)
+                else:
+                    homography_col_c, homography_col_d = st.columns(2)
+                    with homography_col_c:
+                        homography_center_fraction = st.slider("Central point box size", 0.15, 0.75, 0.35, 0.05)
+                    with homography_col_d:
+                        homography_point_search_radius = st.slider("Central point search radius px", 16, 180, 80, 4)
             global_motion_config = GlobalMotionConfig(
                 max_features=int(global_motion_max_features),
                 min_inliers=int(global_motion_min_inliers),
@@ -1376,6 +1398,9 @@ with st.sidebar:
                 homography_smoothing=float(homography_smoothing),
                 homography_max_xy_change_deg=float(homography_max_xy_change),
                 homography_max_total_xy_deg=float(homography_max_total_xy),
+                homography_point_source=homography_point_source,
+                homography_center_fraction=float(homography_center_fraction),
+                homography_point_search_radius_px=int(homography_point_search_radius),
             )
             st.caption("No point tracker is used. The 3D model follows image motion estimated between frame t and t+1.")
     model_max_side = st.slider("Neural model max side", 256, 1024, 384, 64)
