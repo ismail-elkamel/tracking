@@ -1285,14 +1285,24 @@ with st.sidebar:
             global_motion_max_scale = st.slider("Max scale change/frame", 0.01, 0.60, 0.12, 0.01)
             global_motion_max_rotation = st.slider("Max rotation/frame deg", 1.0, 45.0, 8.0, 1.0)
             global_rotation_keyframes: tuple[GlobalMotionRotationKeyframe, ...] = ()
-            use_global_rotation_keyframes = st.checkbox(
-                "Manual X/Y rotation keyframes",
-                value=False,
+            xy_rotation_source = st.selectbox(
+                "X/Y rotation source",
+                [
+                    "Disabled",
+                    "Manual keyframes",
+                    "Homography X/Y",
+                    "Homography X/Y + manual keyframes",
+                ],
+                index=0,
                 help=(
-                    "Adds manual X/Y rotation corrections relative to the initial 3D placement. "
-                    "OpenCV still controls translation, zoom, and 2D rotation."
+                    "OpenCV Global Motion still controls translation, zoom, and Z rotation. "
+                    "This setting only adds X/Y tilt to the 3D overlay."
                 ),
             )
+            use_global_rotation_keyframes = xy_rotation_source in {
+                "Manual keyframes",
+                "Homography X/Y + manual keyframes",
+            }
             if use_global_rotation_keyframes:
                 keyframe_count = st.slider("X/Y keyframe count", 2, 4, 2, 1)
                 keyframes = []
@@ -1336,6 +1346,21 @@ with st.sidebar:
                     )
                 global_rotation_keyframes = tuple(sorted(keyframes, key=lambda item: item.position))
                 st.caption("These are manual X/Y corrections; no image points are selected or tracked.")
+            homography_min_inliers = 60
+            homography_min_inlier_ratio = 0.35
+            homography_smoothing = 0.85
+            homography_max_xy_change = 4.0
+            homography_max_total_xy = 35.0
+            if xy_rotation_source in {"Homography X/Y", "Homography X/Y + manual keyframes"}:
+                st.caption("Homography estimates only X/Y tilt. Translation, zoom, and Z still come from affine global motion.")
+                homography_col_a, homography_col_b = st.columns(2)
+                with homography_col_a:
+                    homography_min_inliers = st.slider("Homography min inliers", 10, 300, 60, 5)
+                    homography_smoothing = st.slider("Homography X/Y smoothing", 0.0, 0.98, 0.85, 0.05)
+                    homography_max_total_xy = st.slider("Max total X/Y deg", 5.0, 70.0, 35.0, 1.0)
+                with homography_col_b:
+                    homography_min_inlier_ratio = st.slider("Homography min inlier ratio", 0.05, 0.90, 0.35, 0.05)
+                    homography_max_xy_change = st.slider("Max X/Y change/frame deg", 0.2, 12.0, 4.0, 0.2)
             global_motion_config = GlobalMotionConfig(
                 max_features=int(global_motion_max_features),
                 min_inliers=int(global_motion_min_inliers),
@@ -1345,6 +1370,12 @@ with st.sidebar:
                 max_scale_change=float(global_motion_max_scale),
                 max_rotation_deg=float(global_motion_max_rotation),
                 rotation_keyframes=global_rotation_keyframes,
+                xy_rotation_source=xy_rotation_source,
+                homography_min_inliers=int(homography_min_inliers),
+                homography_min_inlier_ratio=float(homography_min_inlier_ratio),
+                homography_smoothing=float(homography_smoothing),
+                homography_max_xy_change_deg=float(homography_max_xy_change),
+                homography_max_total_xy_deg=float(homography_max_total_xy),
             )
             st.caption("No point tracker is used. The 3D model follows image motion estimated between frame t and t+1.")
     model_max_side = st.slider("Neural model max side", 256, 1024, 384, 64)

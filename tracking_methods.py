@@ -67,6 +67,12 @@ class GlobalMotionConfig:
     max_scale_change: float = 0.12
     max_rotation_deg: float = 8.0
     rotation_keyframes: tuple["GlobalMotionRotationKeyframe", ...] = ()
+    xy_rotation_source: str = "Disabled"
+    homography_min_inliers: int = 60
+    homography_min_inlier_ratio: float = 0.35
+    homography_smoothing: float = 0.85
+    homography_max_xy_change_deg: float = 4.0
+    homography_max_total_xy_deg: float = 35.0
 
 
 @dataclass(frozen=True)
@@ -2098,11 +2104,11 @@ def homogeneous_to_affine(transform: np.ndarray) -> np.ndarray:
     return transform[:2, :].astype(np.float32)
 
 
-def estimate_global_motion_transform(
+def match_global_motion_features(
     previous_gray: np.ndarray,
     next_gray: np.ndarray,
     config: GlobalMotionConfig,
-) -> tuple[np.ndarray | None, int, int]:
+) -> tuple[np.ndarray, np.ndarray, int]:
     orb = cv2.ORB_create(
         nfeatures=max(200, int(config.max_features)),
         scaleFactor=1.2,
@@ -2112,9 +2118,11 @@ def estimate_global_motion_transform(
     previous_keypoints, previous_desc = orb.detectAndCompute(previous_gray, None)
     next_keypoints, next_desc = orb.detectAndCompute(next_gray, None)
     if previous_desc is None or next_desc is None:
-        return None, 0, 0
+        empty = np.empty((0, 2), dtype=np.float32)
+        return empty, empty, 0
     if len(previous_keypoints) < 4 or len(next_keypoints) < 4:
-        return None, 0, 0
+        empty = np.empty((0, 2), dtype=np.float32)
+        return empty, empty, 0
 
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
     raw_matches = matcher.knnMatch(previous_desc, next_desc, k=2)
@@ -2126,10 +2134,23 @@ def estimate_global_motion_transform(
         if first.distance < 0.75 * second.distance:
             good_matches.append(first)
     if len(good_matches) < 4:
-        return None, len(good_matches), 0
+        empty = np.empty((0, 2), dtype=np.float32)
+        return empty, empty, len(good_matches)
 
     source = np.float32([previous_keypoints[match.queryIdx].pt for match in good_matches])
     target = np.float32([next_keypoints[match.trainIdx].pt for match in good_matches])
+    return source, target, len(good_matches)
+
+
+def estimate_global_motion_from_matches(
+    source: np.ndarray,
+    target: np.ndarray,
+    match_count: int,
+    config: GlobalMotionConfig,
+) -> tuple[np.ndarray | None, int, int]:
+    if len(source) < 4 or len(target) < 4:
+        return None, match_count, 0
+
     transform, inliers = cv2.estimateAffinePartial2D(
         source,
         target,
@@ -2139,9 +2160,88 @@ def estimate_global_motion_transform(
         confidence=0.995,
     )
     if transform is None or not np.isfinite(transform).all():
-        return None, len(good_matches), 0
+        return None, match_count, 0
     inlier_count = int(inliers.sum()) if inliers is not None else 0
-    return transform.astype(np.float32), len(good_matches), inlier_count
+    return transform.astype(np.float32), match_count, inlier_count
+
+
+def estimate_global_motion_transform(
+    previous_gray: np.ndarray,
+    next_gray: np.ndarray,
+    config: GlobalMotionConfig,
+) -> tuple[np.ndarray | None, int, int]:
+    source, target, match_count = match_global_motion_features(previous_gray, next_gray, config)
+    return estimate_global_motion_from_matches(source, target, match_count, config)
+
+
+def image_camera_matrix(width: int, height: int) -> np.ndarray:
+    focal = float(max(width, height))
+    return np.array(
+        [
+            [focal, 0.0, width / 2.0],
+            [0.0, focal, height / 2.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def estimate_homography_xy_rotation_from_matches(
+    source: np.ndarray,
+    target: np.ndarray,
+    match_count: int,
+    frame_shape: tuple[int, int],
+    config: GlobalMotionConfig,
+) -> tuple[tuple[float, float] | None, int, int, str]:
+    if len(source) < 4 or len(target) < 4:
+        return None, match_count, 0, "H no matches"
+
+    homography, inliers = cv2.findHomography(
+        source,
+        target,
+        cv2.RANSAC,
+        ransacReprojThreshold=float(config.ransac_reprojection_px),
+        maxIters=2000,
+        confidence=0.995,
+    )
+    inlier_count = int(inliers.sum()) if inliers is not None else 0
+    inlier_ratio = inlier_count / max(match_count, 1)
+    if (
+        homography is None
+        or not np.isfinite(homography).all()
+        or inlier_count < int(config.homography_min_inliers)
+        or inlier_ratio < float(config.homography_min_inlier_ratio)
+    ):
+        return None, match_count, inlier_count, f"H rejected {inlier_count}/{match_count}"
+
+    height, width = frame_shape
+    try:
+        _, rotations, _, _ = cv2.decomposeHomographyMat(
+            homography.astype(np.float64),
+            image_camera_matrix(width, height),
+        )
+    except cv2.error:
+        return None, match_count, inlier_count, f"H decomposition failed {inlier_count}/{match_count}"
+
+    if not rotations:
+        return None, match_count, inlier_count, f"H no rotations {inlier_count}/{match_count}"
+
+    valid_rotations = [rotation for rotation in rotations if np.linalg.det(rotation) > 0]
+    if not valid_rotations:
+        valid_rotations = list(rotations)
+    rotation = min(
+        valid_rotations,
+        key=lambda candidate: abs(
+            float(np.arccos(np.clip((np.trace(candidate) - 1.0) / 2.0, -1.0, 1.0)))
+        ),
+    )
+    rotate_x, rotate_y, _ = rotation_matrix_to_euler_xyz(rotation.astype(np.float32))
+    return (
+        (float(rotate_x), float(rotate_y)),
+        match_count,
+        inlier_count,
+        f"H rx={rotate_x:+.1f} ry={rotate_y:+.1f} {inlier_count}/{match_count}",
+    )
 
 
 def acceptable_global_motion(transform: np.ndarray, inlier_count: int, config: GlobalMotionConfig) -> bool:
@@ -2224,14 +2324,63 @@ def project_obj_with_global_keyframe_rotation(
     return model_points.astype(np.float32), anchor_points.astype(np.float32)
 
 
-def set_global_keyframe_overrides(
+def update_homography_xy_rotation(
+    current_rotation: tuple[float, float],
+    observed_rotation: tuple[float, float] | None,
+    config: GlobalMotionConfig,
+) -> tuple[tuple[float, float], bool]:
+    if observed_rotation is None:
+        return current_rotation, False
+
+    max_change = max(0.0, float(config.homography_max_xy_change_deg))
+    max_total = max(0.0, float(config.homography_max_total_xy_deg))
+    smoothing = float(np.clip(config.homography_smoothing, 0.0, 0.98))
+    current_x, current_y = current_rotation
+    observed_x, observed_y = observed_rotation
+    delta_x = float(np.clip(observed_x, -max_change, max_change))
+    delta_y = float(np.clip(observed_y, -max_change, max_change))
+    target_x = float(np.clip(current_x + delta_x, -max_total, max_total))
+    target_y = float(np.clip(current_y + delta_y, -max_total, max_total))
+    smoothed_x = current_x * smoothing + target_x * (1.0 - smoothing)
+    smoothed_y = current_y * smoothing + target_y * (1.0 - smoothing)
+    return (float(smoothed_x), float(smoothed_y)), True
+
+
+def combined_global_xy_rotation(
+    position: float,
+    config: GlobalMotionConfig,
+    homography_rotation: tuple[float, float],
+) -> tuple[float, float] | None:
+    source = config.xy_rotation_source
+    use_manual = source in {"Manual keyframes", "Homography X/Y + manual keyframes"}
+    use_homography = source in {"Homography X/Y", "Homography X/Y + manual keyframes"}
+    rotate_x = 0.0
+    rotate_y = 0.0
+    active = False
+
+    if use_homography:
+        rotate_x += float(homography_rotation[0])
+        rotate_y += float(homography_rotation[1])
+        active = True
+
+    if use_manual:
+        manual_rotation = interpolated_global_rotation_keyframe(position, config.rotation_keyframes)
+        if manual_rotation is not None:
+            rotate_x += float(manual_rotation[0])
+            rotate_y += float(manual_rotation[1])
+            active = True
+
+    if not active:
+        return None
+    return rotate_x, rotate_y
+
+
+def set_global_rotation_overrides(
     labels: list[str],
     cumulative_transform: np.ndarray,
-    position: float,
-    keyframes: tuple[GlobalMotionRotationKeyframe, ...],
+    rotation: tuple[float, float] | None,
 ) -> tuple[float, float] | None:
     OBJ_RUNTIME_POINT_OVERRIDES.clear()
-    rotation = interpolated_global_rotation_keyframe(position, keyframes)
     if rotation is None:
         return None
 
@@ -2249,6 +2398,19 @@ def set_global_keyframe_overrides(
             rotate_y,
         )
     return rotate_x, rotate_y
+
+
+def set_global_keyframe_overrides(
+    labels: list[str],
+    cumulative_transform: np.ndarray,
+    position: float,
+    keyframes: tuple[GlobalMotionRotationKeyframe, ...],
+) -> tuple[float, float] | None:
+    return set_global_rotation_overrides(
+        labels,
+        cumulative_transform,
+        interpolated_global_rotation_keyframe(position, keyframes),
+    )
 
 
 def transform_groups_with_global_motion(
@@ -2293,17 +2455,17 @@ def track_with_global_motion(
     saved_path = Path(output_path) if output_path else None
     start_time = time.perf_counter()
     cumulative_transform = np.eye(3, dtype=np.float32)
+    homography_xy_rotation = (0.0, 0.0)
     initial_tracks = [track.copy().astype(np.float32) for track in tracks]
     frames_written = 0
     total_relative_frames = max(1, int(end_frame) - int(start_frame))
 
     try:
         instrument_mask = predict_instrument_mask(previous_rgb, instrument_avoidance)
-        active_keyframe_rotation = set_global_keyframe_overrides(
+        active_xy_rotation = set_global_rotation_overrides(
             labels,
             cumulative_transform,
-            0.0,
-            config.rotation_keyframes,
+            combined_global_xy_rotation(0.0, config, homography_xy_rotation),
         )
         emit_tracked_frame(
             previous_rgb,
@@ -2323,9 +2485,15 @@ def track_with_global_motion(
 
             next_gray = cv2.cvtColor(next_bgr, cv2.COLOR_BGR2GRAY)
             next_rgb = cv2.cvtColor(next_bgr, cv2.COLOR_BGR2RGB)
-            transform, match_count, inlier_count = estimate_global_motion_transform(
+            source_points, target_points, match_count = match_global_motion_features(
                 previous_gray,
                 next_gray,
+                config,
+            )
+            transform, match_count, inlier_count = estimate_global_motion_from_matches(
+                source_points,
+                target_points,
+                match_count,
                 config,
             )
             accepted = transform is not None and acceptable_global_motion(transform, inlier_count, config)
@@ -2341,14 +2509,37 @@ def track_with_global_motion(
                 dx, dy = transform[:, 2]
                 motion_text = f"rejected dx={dx:+.1f} dy={dy:+.1f} scale={scale:.3f} rot={angle:+.1f}deg"
 
+            homography_text = ""
+            if config.xy_rotation_source in {"Homography X/Y", "Homography X/Y + manual keyframes"}:
+                observed_xy_rotation, _, homography_inliers, homography_text = (
+                    estimate_homography_xy_rotation_from_matches(
+                        source_points,
+                        target_points,
+                        match_count,
+                        next_gray.shape[:2],
+                        config,
+                    )
+                )
+                homography_xy_rotation, homography_accepted = update_homography_xy_rotation(
+                    homography_xy_rotation,
+                    observed_xy_rotation,
+                    config,
+                )
+                if homography_accepted:
+                    homography_text = (
+                        f"{homography_text}, total rx={homography_xy_rotation[0]:+.1f} "
+                        f"ry={homography_xy_rotation[1]:+.1f}"
+                    )
+                elif not homography_text:
+                    homography_text = f"H frozen {homography_inliers}/{match_count}"
+
             instrument_mask = predict_instrument_mask(next_rgb, instrument_avoidance)
             grouped_tracks = transform_groups_with_global_motion(initial_tracks, cumulative_transform)
             clip_position = float(absolute_frame - start_frame) / float(total_relative_frames)
-            active_keyframe_rotation = set_global_keyframe_overrides(
+            active_xy_rotation = set_global_rotation_overrides(
                 labels,
                 cumulative_transform,
-                clip_position,
-                config.rotation_keyframes,
+                combined_global_xy_rotation(clip_position, config, homography_xy_rotation),
             )
             emit_tracked_frame(
                 next_rgb,
@@ -2361,13 +2552,15 @@ def track_with_global_motion(
             )
             frames_written += 1
             state = "accepted" if accepted else "frozen"
-            keyframe_text = ""
-            if active_keyframe_rotation is not None:
-                rotate_x, rotate_y = active_keyframe_rotation
-                keyframe_text = f", keyframe rx={rotate_x:+.1f} ry={rotate_y:+.1f}"
+            xy_text = ""
+            if active_xy_rotation is not None:
+                rotate_x, rotate_y = active_xy_rotation
+                xy_text = f", xy rx={rotate_x:+.1f} ry={rotate_y:+.1f}"
+            if homography_text:
+                xy_text = f"{xy_text}, {homography_text}" if xy_text else f", {homography_text}"
             status_placeholder.caption(
                 f"Global motion frame {absolute_frame} / {end_frame}: {state}, "
-                f"{inlier_count}/{match_count} inliers, {motion_text}{keyframe_text}"
+                f"{inlier_count}/{match_count} inliers, {motion_text}{xy_text}"
             )
             if show_live_preview:
                 sync_to_video_clock(start_time, absolute_frame - start_frame, fps)
