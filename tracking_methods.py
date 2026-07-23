@@ -620,6 +620,21 @@ def euler_xyz_to_rotation_matrix(rx_deg: float, ry_deg: float, rz_deg: float) ->
     return (rot_z @ rot_y @ rot_x).astype(np.float32)
 
 
+def rotation_matrix_to_euler_xyz(rotation: np.ndarray) -> tuple[float, float, float]:
+    rotation = rotation.astype(np.float32, copy=False)
+    sy = float(np.sqrt(rotation[0, 0] * rotation[0, 0] + rotation[1, 0] * rotation[1, 0]))
+    singular = sy < 1e-6
+    if not singular:
+        x = float(np.arctan2(rotation[2, 1], rotation[2, 2]))
+        y = float(np.arctan2(-rotation[2, 0], sy))
+        z = float(np.arctan2(rotation[1, 0], rotation[0, 0]))
+    else:
+        x = float(np.arctan2(-rotation[1, 2], rotation[1, 1]))
+        y = float(np.arctan2(-rotation[2, 0], sy))
+        z = 0.0
+    return tuple(float(np.degrees(value)) for value in (x, y, z))
+
+
 def estimate_obj_pnp_pose(
     metadata: ObjOverlayMetadata,
     tracked_points: np.ndarray,
