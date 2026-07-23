@@ -2295,9 +2295,16 @@ def track_with_global_motion(
     cumulative_transform = np.eye(3, dtype=np.float32)
     initial_tracks = [track.copy().astype(np.float32) for track in tracks]
     frames_written = 0
+    total_relative_frames = max(1, int(end_frame) - int(start_frame))
 
     try:
         instrument_mask = predict_instrument_mask(previous_rgb, instrument_avoidance)
+        active_keyframe_rotation = set_global_keyframe_overrides(
+            labels,
+            cumulative_transform,
+            0.0,
+            config.rotation_keyframes,
+        )
         emit_tracked_frame(
             previous_rgb,
             transform_groups_with_global_motion(initial_tracks, cumulative_transform),
@@ -2336,6 +2343,13 @@ def track_with_global_motion(
 
             instrument_mask = predict_instrument_mask(next_rgb, instrument_avoidance)
             grouped_tracks = transform_groups_with_global_motion(initial_tracks, cumulative_transform)
+            clip_position = float(absolute_frame - start_frame) / float(total_relative_frames)
+            active_keyframe_rotation = set_global_keyframe_overrides(
+                labels,
+                cumulative_transform,
+                clip_position,
+                config.rotation_keyframes,
+            )
             emit_tracked_frame(
                 next_rgb,
                 grouped_tracks,
@@ -2347,14 +2361,19 @@ def track_with_global_motion(
             )
             frames_written += 1
             state = "accepted" if accepted else "frozen"
+            keyframe_text = ""
+            if active_keyframe_rotation is not None:
+                rotate_x, rotate_y = active_keyframe_rotation
+                keyframe_text = f", keyframe rx={rotate_x:+.1f} ry={rotate_y:+.1f}"
             status_placeholder.caption(
                 f"Global motion frame {absolute_frame} / {end_frame}: {state}, "
-                f"{inlier_count}/{match_count} inliers, {motion_text}"
+                f"{inlier_count}/{match_count} inliers, {motion_text}{keyframe_text}"
             )
             if show_live_preview:
                 sync_to_video_clock(start_time, absolute_frame - start_frame, fps)
             previous_gray = next_gray
     finally:
+        OBJ_RUNTIME_POINT_OVERRIDES.clear()
         cap.release()
         if output_writer is not None:
             output_writer.release()
