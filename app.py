@@ -27,6 +27,7 @@ from tracking_methods import (
     CPU_DEVICE,
     CUDA_DEVICE,
     GlobalMotionConfig,
+    GlobalMotionRotationKeyframe,
     InstrumentAvoidanceConfig,
     LITETRACKER_TRACKER,
     MEDSAM2_TRACKER,
@@ -1253,13 +1254,19 @@ with st.sidebar:
         )
         tracker_name = selected_trackers[0] if selected_trackers else OPENCV_TRACKER
         collage_tile_width = st.slider("Collage tile width", 320, 960, 640, 64)
+        show_global_motion_window = st.checkbox(
+            "Show separate OpenCV Global Motion window",
+            value=True,
+            help="Runs or reuses OpenCV Global Motion and displays it next to the comparison collage.",
+        )
     else:
         tracker_name = st.selectbox("Tracker", tracker_options)
         selected_trackers = [tracker_name]
         collage_tile_width = 640
+        show_global_motion_window = False
     frame_skip = st.slider("OpenCV frame step", 1, 10, 1)
     global_motion_config: GlobalMotionConfig | None = None
-    if OPENCV_GLOBAL_MOTION_TRACKER in selected_trackers:
+    if OPENCV_GLOBAL_MOTION_TRACKER in selected_trackers or show_global_motion_window:
         with st.expander("OpenCV Global Motion settings", expanded=True):
             global_motion_max_features = st.slider("Global motion ORB features", 200, 5000, 2000, 100)
             global_motion_min_inliers = st.slider("Global motion min inliers", 4, 200, 30, 1)
@@ -1268,6 +1275,58 @@ with st.sidebar:
             global_motion_max_translation = st.slider("Max translation/frame px", 5.0, 300.0, 80.0, 5.0)
             global_motion_max_scale = st.slider("Max scale change/frame", 0.01, 0.60, 0.12, 0.01)
             global_motion_max_rotation = st.slider("Max rotation/frame deg", 1.0, 45.0, 8.0, 1.0)
+            global_rotation_keyframes: tuple[GlobalMotionRotationKeyframe, ...] = ()
+            use_global_rotation_keyframes = st.checkbox(
+                "Manual X/Y rotation keyframes",
+                value=False,
+                help=(
+                    "Adds manual X/Y rotation corrections relative to the initial 3D placement. "
+                    "OpenCV still controls translation, zoom, and 2D rotation."
+                ),
+            )
+            if use_global_rotation_keyframes:
+                keyframe_count = st.slider("X/Y keyframe count", 2, 4, 2, 1)
+                keyframes = []
+                for keyframe_index in range(keyframe_count):
+                    default_position = 0.0 if keyframe_count == 1 else keyframe_index / (keyframe_count - 1)
+                    st.caption(f"X/Y correction keyframe {keyframe_index + 1}")
+                    key_col_a, key_col_b, key_col_c = st.columns(3)
+                    with key_col_a:
+                        position_percent = st.slider(
+                            "Position in clip %",
+                            0,
+                            100,
+                            int(round(default_position * 100.0)),
+                            1,
+                            key=f"global_xy_keyframe_pos_{keyframe_index}",
+                        )
+                    with key_col_b:
+                        rotate_x = st.slider(
+                            "Add Rotate X deg",
+                            -45.0,
+                            45.0,
+                            0.0,
+                            0.5,
+                            key=f"global_xy_keyframe_rx_{keyframe_index}",
+                        )
+                    with key_col_c:
+                        rotate_y = st.slider(
+                            "Add Rotate Y deg",
+                            -45.0,
+                            45.0,
+                            0.0,
+                            0.5,
+                            key=f"global_xy_keyframe_ry_{keyframe_index}",
+                        )
+                    keyframes.append(
+                        GlobalMotionRotationKeyframe(
+                            position=float(position_percent) / 100.0,
+                            rotate_x=float(rotate_x),
+                            rotate_y=float(rotate_y),
+                        )
+                    )
+                global_rotation_keyframes = tuple(sorted(keyframes, key=lambda item: item.position))
+                st.caption("These are manual X/Y corrections; no image points are selected or tracked.")
             global_motion_config = GlobalMotionConfig(
                 max_features=int(global_motion_max_features),
                 min_inliers=int(global_motion_min_inliers),
@@ -1276,6 +1335,7 @@ with st.sidebar:
                 max_translation_px=float(global_motion_max_translation),
                 max_scale_change=float(global_motion_max_scale),
                 max_rotation_deg=float(global_motion_max_rotation),
+                rotation_keyframes=global_rotation_keyframes,
             )
             st.caption("No point tracker is used. The 3D model follows image motion estimated between frame t and t+1.")
     model_max_side = st.slider("Neural model max side", 256, 1024, 384, 64)
@@ -2189,6 +2249,8 @@ try:
         if compare_mode:
             st.subheader("Comparing models")
             completed_outputs: list[tuple[str, Path]] = []
+            global_motion_saved_path: Path | None = None
+            global_motion_error = ""
             for index, selected_tracker in enumerate(selected_trackers, start=1):
                 result_path = output_video_path(test_dir, selected_tracker)
                 run_device_name = tracker_device_for_run(
@@ -2237,6 +2299,8 @@ try:
                 if saved_path and Path(saved_path).exists():
                     status = "success"
                     completed_outputs.append((selected_tracker, Path(saved_path)))
+                    if selected_tracker == OPENCV_GLOBAL_MOTION_TRACKER:
+                        global_motion_saved_path = Path(saved_path)
                     st.success(f"{selected_tracker} finished in {duration:.2f}s")
                 else:
                     if not error_message:
@@ -2319,18 +2383,102 @@ try:
                     "error": "",
                 },
             )
+            if show_global_motion_window and global_motion_saved_path is None:
+                global_motion_result_path = output_video_path(test_dir, "OpenCV Global Motion Dedicated")
+                global_motion_start_time = time.perf_counter()
+                status_placeholder.caption("Running dedicated OpenCV Global Motion window...")
+                try:
+                    maybe_global_motion_path = run_tracker_model(
+                        OPENCV_GLOBAL_MOTION_TRACKER,
+                        tracking_video_path,
+                        tracking_start_frame,
+                        tracking_end_frame,
+                        tracks,
+                        labels,
+                        fps,
+                        frame_skip,
+                        model_max_side,
+                        lite_weights_path,
+                        cotracker_offline_chunk_frames,
+                        device_name,
+                        external_commands,
+                        global_motion_result_path,
+                        frame_placeholder,
+                        status_placeholder,
+                        show_live_preview,
+                        freeze_lost_points,
+                        instrument_avoidance,
+                        track_validation,
+                        global_motion_config,
+                    )
+                    if maybe_global_motion_path and Path(maybe_global_motion_path).exists():
+                        global_motion_saved_path = Path(maybe_global_motion_path)
+                        global_motion_status = "success"
+                    else:
+                        global_motion_status = "failed"
+                        global_motion_error = "No output video was created."
+                except RuntimeError as error:
+                    global_motion_status = "failed"
+                    global_motion_error = format_tracker_error(error)
+                    st.error(f"Dedicated OpenCV Global Motion failed:\n\n{global_motion_error}")
+                append_timing_log(
+                    test_dir,
+                    {
+                        "timestamp": run_timestamp,
+                        "video": str(video_path),
+                        "mode": "global_motion_window",
+                        "model": OPENCV_GLOBAL_MOTION_TRACKER,
+                        "device": device_name,
+                        "start_frame": frame_index,
+                        "end_frame": end_frame,
+                        "annotation_count": annotation_count,
+                        "point_count": point_count,
+                        "status": global_motion_status,
+                        "duration_seconds": f"{time.perf_counter() - global_motion_start_time:.3f}",
+                        "output_path": str(global_motion_saved_path or global_motion_result_path),
+                        "error": global_motion_error,
+                    },
+                )
             collage_preview_path = make_streamlit_preview_video(Path(collage_saved_path))
             collage_preview_bytes = Path(collage_preview_path).read_bytes()
             collage_bytes = Path(collage_saved_path).read_bytes()
+            global_motion_preview_bytes = None
+            global_motion_bytes = None
+            if global_motion_saved_path is not None and global_motion_saved_path.exists():
+                global_motion_preview_path = make_streamlit_preview_video(global_motion_saved_path)
+                global_motion_preview_bytes = Path(global_motion_preview_path).read_bytes()
+                global_motion_bytes = global_motion_saved_path.read_bytes()
             timing_bytes = log_path.read_bytes() if log_path.exists() else b""
             status_placeholder.success("Comparison collage finished. Local working files will be removed.")
-            st.video(collage_preview_bytes)
-            st.download_button(
-                "Download comparison collage",
-                data=collage_bytes,
-                file_name=Path(collage_saved_path).name,
-                mime="video/mp4",
-            )
+            if show_global_motion_window:
+                compare_tab, global_motion_tab = st.tabs(["Compare models", "OpenCV Global Motion"])
+                with compare_tab:
+                    st.video(collage_preview_bytes)
+                    st.download_button(
+                        "Download comparison collage",
+                        data=collage_bytes,
+                        file_name=Path(collage_saved_path).name,
+                        mime="video/mp4",
+                    )
+                with global_motion_tab:
+                    if global_motion_preview_bytes is None or global_motion_bytes is None:
+                        st.error(global_motion_error or "OpenCV Global Motion did not create an output video.")
+                    else:
+                        st.video(global_motion_preview_bytes)
+                        st.download_button(
+                            "Download OpenCV Global Motion video",
+                            data=global_motion_bytes,
+                            file_name=global_motion_saved_path.name,
+                            mime="video/mp4",
+                        )
+            else:
+                st.video(collage_preview_bytes)
+                st.download_button(
+                    "Download comparison collage",
+                    data=collage_bytes,
+                    file_name=Path(collage_saved_path).name,
+                    mime="video/mp4",
+                )
             if timing_bytes:
                 st.download_button(
                     "Download timing CSV",

@@ -66,6 +66,14 @@ class GlobalMotionConfig:
     max_translation_px: float = 80.0
     max_scale_change: float = 0.12
     max_rotation_deg: float = 8.0
+    rotation_keyframes: tuple["GlobalMotionRotationKeyframe", ...] = ()
+
+
+@dataclass(frozen=True)
+class GlobalMotionRotationKeyframe:
+    position: float
+    rotate_x: float = 0.0
+    rotate_y: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -99,6 +107,7 @@ class ObjOverlayMetadata:
 OBJ_OVERLAYS: dict[str, ObjOverlayMetadata] = {}
 OBJ_PNP_POSE_CACHE: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 OBJ_2D_TRANSFORM_CACHE: dict[str, np.ndarray] = {}
+OBJ_RUNTIME_POINT_OVERRIDES: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
 
 def obj_edges_from_faces(
@@ -594,6 +603,17 @@ def obj_camera_matrix(metadata: ObjOverlayMetadata) -> np.ndarray:
     )
 
 
+def euler_xyz_to_rotation_matrix(rx_deg: float, ry_deg: float, rz_deg: float) -> np.ndarray:
+    rx, ry, rz = (np.radians(float(value)) for value in (rx_deg, ry_deg, rz_deg))
+    cx, sx = float(np.cos(rx)), float(np.sin(rx))
+    cy, sy = float(np.cos(ry)), float(np.sin(ry))
+    cz, sz = float(np.cos(rz)), float(np.sin(rz))
+    rot_x = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float32)
+    rot_y = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float32)
+    rot_z = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
+    return (rot_z @ rot_y @ rot_x).astype(np.float32)
+
+
 def estimate_obj_pnp_pose(
     metadata: ObjOverlayMetadata,
     tracked_points: np.ndarray,
@@ -731,7 +751,10 @@ def draw_obj_mesh(
 ) -> np.ndarray:
     base_frame = output.copy()
     metadata = OBJ_OVERLAYS.get(label)
-    if metadata is not None and metadata.transform_mode == "Stabilized similarity":
+    override = OBJ_RUNTIME_POINT_OVERRIDES.get(label)
+    if override is not None:
+        points, anchor_points = override
+    elif metadata is not None and metadata.transform_mode == "Stabilized similarity":
         transform = estimate_stabilized_obj_transform(label, tracked_points)
         points = apply_obj_transform(metadata.model_points, transform)
         anchor_points = apply_obj_transform(metadata.anchor_points, transform)
@@ -2138,6 +2161,94 @@ def smooth_incremental_transform(transform: np.ndarray, smoothing: float) -> np.
     smoothing = float(np.clip(smoothing, 0.0, 0.98))
     identity = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
     return (identity * smoothing + transform.astype(np.float32) * (1.0 - smoothing)).astype(np.float32)
+
+
+def interpolated_global_rotation_keyframe(
+    position: float,
+    keyframes: tuple[GlobalMotionRotationKeyframe, ...],
+) -> tuple[float, float] | None:
+    if not keyframes:
+        return None
+
+    position = float(np.clip(position, 0.0, 1.0))
+    sorted_keyframes = sorted(keyframes, key=lambda item: float(item.position))
+    if position <= float(sorted_keyframes[0].position):
+        return float(sorted_keyframes[0].rotate_x), float(sorted_keyframes[0].rotate_y)
+    if position >= float(sorted_keyframes[-1].position):
+        return float(sorted_keyframes[-1].rotate_x), float(sorted_keyframes[-1].rotate_y)
+
+    for previous_keyframe, next_keyframe in zip(sorted_keyframes, sorted_keyframes[1:]):
+        previous_position = float(previous_keyframe.position)
+        next_position = float(next_keyframe.position)
+        if not previous_position <= position <= next_position:
+            continue
+        span = max(next_position - previous_position, 1e-6)
+        weight = (position - previous_position) / span
+        rotate_x = (1.0 - weight) * float(previous_keyframe.rotate_x) + weight * float(next_keyframe.rotate_x)
+        rotate_y = (1.0 - weight) * float(previous_keyframe.rotate_y) + weight * float(next_keyframe.rotate_y)
+        return rotate_x, rotate_y
+
+    return float(sorted_keyframes[-1].rotate_x), float(sorted_keyframes[-1].rotate_y)
+
+
+def project_obj_with_global_keyframe_rotation(
+    metadata: ObjOverlayMetadata,
+    cumulative_transform: np.ndarray,
+    rotate_x: float,
+    rotate_y: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    transform = homogeneous_to_affine(cumulative_transform)
+    center = np.mean(metadata.model_points.astype(np.float32), axis=0, keepdims=True)
+    center = apply_obj_transform(center, transform)[0]
+
+    linear = transform[:, :2].astype(np.float32)
+    scale_multiplier = float(np.sqrt(max(abs(np.linalg.det(linear)), 1e-6)))
+    image_rotation = linear / max(scale_multiplier, 1e-6)
+    source_extent = float(np.ptp(metadata.model_points_3d[:, :2], axis=0).max())
+    image_extent = float(np.ptp(metadata.model_points, axis=0).max())
+    base_scale = image_extent / max(source_extent, 1e-6)
+    scale = max(1.0, base_scale * scale_multiplier)
+
+    correction = euler_xyz_to_rotation_matrix(rotate_x, rotate_y, 0.0)
+    rotated_model = metadata.model_points_3d @ correction.T
+    rotated_anchors = metadata.anchor_points_3d @ correction.T
+    model_offsets = np.empty((len(rotated_model), 2), dtype=np.float32)
+    anchor_offsets = np.empty((len(rotated_anchors), 2), dtype=np.float32)
+    model_offsets[:, 0] = rotated_model[:, 0] * scale
+    model_offsets[:, 1] = -rotated_model[:, 1] * scale
+    anchor_offsets[:, 0] = rotated_anchors[:, 0] * scale
+    anchor_offsets[:, 1] = -rotated_anchors[:, 1] * scale
+
+    model_points = center + (model_offsets @ image_rotation.T)
+    anchor_points = center + (anchor_offsets @ image_rotation.T)
+    return model_points.astype(np.float32), anchor_points.astype(np.float32)
+
+
+def set_global_keyframe_overrides(
+    labels: list[str],
+    cumulative_transform: np.ndarray,
+    position: float,
+    keyframes: tuple[GlobalMotionRotationKeyframe, ...],
+) -> tuple[float, float] | None:
+    OBJ_RUNTIME_POINT_OVERRIDES.clear()
+    rotation = interpolated_global_rotation_keyframe(position, keyframes)
+    if rotation is None:
+        return None
+
+    rotate_x, rotate_y = rotation
+    for label in labels:
+        if not label.startswith("obj "):
+            continue
+        metadata = OBJ_OVERLAYS.get(label)
+        if metadata is None:
+            continue
+        OBJ_RUNTIME_POINT_OVERRIDES[label] = project_obj_with_global_keyframe_rotation(
+            metadata,
+            cumulative_transform,
+            rotate_x,
+            rotate_y,
+        )
+    return rotate_x, rotate_y
 
 
 def transform_groups_with_global_motion(
