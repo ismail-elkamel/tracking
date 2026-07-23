@@ -106,6 +106,8 @@ TRACKER_OPTIONS = [
     SAM3_TRACKER,
     MEDSAM2_TRACKER,
 ]
+WORKFLOW_COMPARE = "Compare models"
+WORKFLOW_GLOBAL_MOTION = "OpenCV Global Motion"
 
 
 @dataclass(frozen=True)
@@ -1196,6 +1198,18 @@ def run_tracker_model(
 
 st.set_page_config(page_title="Surgical Video Tracker", layout="wide")
 st.title("Surgical Video Tracker")
+st.subheader("Choose workflow")
+workflow_mode = st.radio(
+    "Workflow",
+    [WORKFLOW_COMPARE, WORKFLOW_GLOBAL_MOTION],
+    horizontal=True,
+    label_visibility="collapsed",
+)
+workflow_compare_col, workflow_global_col = st.columns(2)
+with workflow_compare_col:
+    st.caption("Compare several trackers and build one collage video.")
+with workflow_global_col:
+    st.caption("Use OpenCV image motion, optional X/Y keyframes, and the 3D overlay.")
 
 if st.session_state.get("model_cache_version") != "instrument_avoidance_v2":
     st.cache_resource.clear()
@@ -1245,7 +1259,7 @@ with st.sidebar:
         with st.expander("Unavailable external trackers", expanded=False):
             for unavailable_tracker in unavailable_trackers:
                 st.warning(unavailable_external_tracker_message(unavailable_tracker))
-    compare_mode = st.checkbox("Compare models", value=False)
+    compare_mode = workflow_mode == WORKFLOW_COMPARE
     if compare_mode:
         selected_trackers = st.multiselect(
             "Models to compare",
@@ -1254,19 +1268,14 @@ with st.sidebar:
         )
         tracker_name = selected_trackers[0] if selected_trackers else OPENCV_TRACKER
         collage_tile_width = st.slider("Collage tile width", 320, 960, 640, 64)
-        show_global_motion_window = st.checkbox(
-            "Show separate OpenCV Global Motion window",
-            value=True,
-            help="Runs or reuses OpenCV Global Motion and displays it next to the comparison collage.",
-        )
     else:
-        tracker_name = st.selectbox("Tracker", tracker_options)
+        tracker_name = OPENCV_GLOBAL_MOTION_TRACKER
         selected_trackers = [tracker_name]
         collage_tile_width = 640
-        show_global_motion_window = False
+        st.caption("OpenCV Global Motion workflow: no neural point tracker is required.")
     frame_skip = st.slider("OpenCV frame step", 1, 10, 1)
     global_motion_config: GlobalMotionConfig | None = None
-    if OPENCV_GLOBAL_MOTION_TRACKER in selected_trackers or show_global_motion_window:
+    if OPENCV_GLOBAL_MOTION_TRACKER in selected_trackers:
         with st.expander("OpenCV Global Motion settings", expanded=True):
             global_motion_max_features = st.slider("Global motion ORB features", 200, 5000, 2000, 100)
             global_motion_min_inliers = st.slider("Global motion min inliers", 4, 200, 30, 1)
@@ -2249,8 +2258,6 @@ try:
         if compare_mode:
             st.subheader("Comparing models")
             completed_outputs: list[tuple[str, Path]] = []
-            global_motion_saved_path: Path | None = None
-            global_motion_error = ""
             for index, selected_tracker in enumerate(selected_trackers, start=1):
                 result_path = output_video_path(test_dir, selected_tracker)
                 run_device_name = tracker_device_for_run(
@@ -2299,8 +2306,6 @@ try:
                 if saved_path and Path(saved_path).exists():
                     status = "success"
                     completed_outputs.append((selected_tracker, Path(saved_path)))
-                    if selected_tracker == OPENCV_GLOBAL_MOTION_TRACKER:
-                        global_motion_saved_path = Path(saved_path)
                     st.success(f"{selected_tracker} finished in {duration:.2f}s")
                 else:
                     if not error_message:
@@ -2383,102 +2388,18 @@ try:
                     "error": "",
                 },
             )
-            if show_global_motion_window and global_motion_saved_path is None:
-                global_motion_result_path = output_video_path(test_dir, "OpenCV Global Motion Dedicated")
-                global_motion_start_time = time.perf_counter()
-                status_placeholder.caption("Running dedicated OpenCV Global Motion window...")
-                try:
-                    maybe_global_motion_path = run_tracker_model(
-                        OPENCV_GLOBAL_MOTION_TRACKER,
-                        tracking_video_path,
-                        tracking_start_frame,
-                        tracking_end_frame,
-                        tracks,
-                        labels,
-                        fps,
-                        frame_skip,
-                        model_max_side,
-                        lite_weights_path,
-                        cotracker_offline_chunk_frames,
-                        device_name,
-                        external_commands,
-                        global_motion_result_path,
-                        frame_placeholder,
-                        status_placeholder,
-                        show_live_preview,
-                        freeze_lost_points,
-                        instrument_avoidance,
-                        track_validation,
-                        global_motion_config,
-                    )
-                    if maybe_global_motion_path and Path(maybe_global_motion_path).exists():
-                        global_motion_saved_path = Path(maybe_global_motion_path)
-                        global_motion_status = "success"
-                    else:
-                        global_motion_status = "failed"
-                        global_motion_error = "No output video was created."
-                except RuntimeError as error:
-                    global_motion_status = "failed"
-                    global_motion_error = format_tracker_error(error)
-                    st.error(f"Dedicated OpenCV Global Motion failed:\n\n{global_motion_error}")
-                append_timing_log(
-                    test_dir,
-                    {
-                        "timestamp": run_timestamp,
-                        "video": str(video_path),
-                        "mode": "global_motion_window",
-                        "model": OPENCV_GLOBAL_MOTION_TRACKER,
-                        "device": device_name,
-                        "start_frame": frame_index,
-                        "end_frame": end_frame,
-                        "annotation_count": annotation_count,
-                        "point_count": point_count,
-                        "status": global_motion_status,
-                        "duration_seconds": f"{time.perf_counter() - global_motion_start_time:.3f}",
-                        "output_path": str(global_motion_saved_path or global_motion_result_path),
-                        "error": global_motion_error,
-                    },
-                )
             collage_preview_path = make_streamlit_preview_video(Path(collage_saved_path))
             collage_preview_bytes = Path(collage_preview_path).read_bytes()
             collage_bytes = Path(collage_saved_path).read_bytes()
-            global_motion_preview_bytes = None
-            global_motion_bytes = None
-            if global_motion_saved_path is not None and global_motion_saved_path.exists():
-                global_motion_preview_path = make_streamlit_preview_video(global_motion_saved_path)
-                global_motion_preview_bytes = Path(global_motion_preview_path).read_bytes()
-                global_motion_bytes = global_motion_saved_path.read_bytes()
             timing_bytes = log_path.read_bytes() if log_path.exists() else b""
             status_placeholder.success("Comparison collage finished. Local working files will be removed.")
-            if show_global_motion_window:
-                compare_tab, global_motion_tab = st.tabs(["Compare models", "OpenCV Global Motion"])
-                with compare_tab:
-                    st.video(collage_preview_bytes)
-                    st.download_button(
-                        "Download comparison collage",
-                        data=collage_bytes,
-                        file_name=Path(collage_saved_path).name,
-                        mime="video/mp4",
-                    )
-                with global_motion_tab:
-                    if global_motion_preview_bytes is None or global_motion_bytes is None:
-                        st.error(global_motion_error or "OpenCV Global Motion did not create an output video.")
-                    else:
-                        st.video(global_motion_preview_bytes)
-                        st.download_button(
-                            "Download OpenCV Global Motion video",
-                            data=global_motion_bytes,
-                            file_name=global_motion_saved_path.name,
-                            mime="video/mp4",
-                        )
-            else:
-                st.video(collage_preview_bytes)
-                st.download_button(
-                    "Download comparison collage",
-                    data=collage_bytes,
-                    file_name=Path(collage_saved_path).name,
-                    mime="video/mp4",
-                )
+            st.video(collage_preview_bytes)
+            st.download_button(
+                "Download comparison collage",
+                data=collage_bytes,
+                file_name=Path(collage_saved_path).name,
+                mime="video/mp4",
+            )
             if timing_bytes:
                 st.download_button(
                     "Download timing CSV",
