@@ -26,7 +26,6 @@ Kept:
 - `SAM3`
 - `MedSAM2`
 - `instrument_segmentation/`
-- `test_global_motion.py`
 
 Removed from the GitHub repo:
 
@@ -217,36 +216,6 @@ Max total X/Y deg: 35
 
 If homography is unstable, turn it off and use manual X/Y keyframes.
 
-## Standalone Global Motion Test
-
-For dev-team debugging without Streamlit, use:
-
-```text
-test_global_motion.py
-```
-
-Example:
-
-```bash
-python test_global_motion.py \
-  --video data/input/example.mp4 \
-  --output global_motion_test.mp4 \
-  --csv global_motion_test.csv \
-  --draw-matches
-```
-
-It writes:
-
-- an annotated MP4 with the accumulated affine motion;
-- a CSV with per-frame matches, inliers, translation, scale, and Z rotation.
-
-This script uses only:
-
-- OpenCV;
-- NumPy.
-
-It does not use Streamlit, CoTracker, TAPIR, SAM3, MedSAM2, or the 3D overlay code.
-
 ## Instrument Segmentation
 
 `instrument_segmentation/` contains the training and export code for the optional instrument-avoidance mask.
@@ -292,10 +261,7 @@ The most important files for the current global-motion work are:
 ```text
 app.py
 tracking_methods.py
-test_global_motion.py
 README.md
 ```
 
-For debugging only the OpenCV motion estimator, start with `test_global_motion.py`.
-
-For debugging how that motion affects the 3D overlay, use the Streamlit `OpenCV Global Motion` workflow.
+For debugging OpenCV motion and how it affects the 3D overlay, use the Streamlit `OpenCV Global Motion` workflow.
