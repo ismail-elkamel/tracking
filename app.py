@@ -33,9 +33,7 @@ from tracking_methods import (
     MEDSAM2_TRACKER,
     OPENCV_GLOBAL_MOTION_TRACKER,
     OPENCV_TRACKER,
-    SAM2_TRACKER,
     SAM3_TRACKER,
-    SURGISAM2_TRACKER,
     TrackValidationConfig,
     create_comparison_collage,
     cuda_is_available,
@@ -1175,8 +1173,6 @@ def run_tracker_model(
     if tracker_name in {
         TAPIR_TRACKER,
         BOOTSTAPIR_TRACKER,
-        SAM2_TRACKER,
-        SURGISAM2_TRACKER,
         SAM3_TRACKER,
         MEDSAM2_TRACKER,
     }:
@@ -1247,8 +1243,6 @@ with st.sidebar:
         in {
             TAPIR_TRACKER,
             BOOTSTAPIR_TRACKER,
-            SAM2_TRACKER,
-            SURGISAM2_TRACKER,
             SAM3_TRACKER,
             MEDSAM2_TRACKER,
         }
@@ -1470,8 +1464,6 @@ with st.sidebar:
     uses_external_device = any(
         tracker
         in {
-            SAM2_TRACKER,
-            SURGISAM2_TRACKER,
             SAM3_TRACKER,
             MEDSAM2_TRACKER,
             TAPIR_TRACKER,
@@ -1530,8 +1522,6 @@ with st.sidebar:
     for external_tracker in [
         TAPIR_TRACKER,
         BOOTSTAPIR_TRACKER,
-        SAM2_TRACKER,
-        SURGISAM2_TRACKER,
         SAM3_TRACKER,
         MEDSAM2_TRACKER,
     ]:
@@ -2235,8 +2225,6 @@ try:
             if selected_tracker in {
                 TAPIR_TRACKER,
                 BOOTSTAPIR_TRACKER,
-                SAM2_TRACKER,
-                SURGISAM2_TRACKER,
                 SAM3_TRACKER,
                 MEDSAM2_TRACKER,
             }:
@@ -2257,8 +2245,6 @@ try:
         elif tracker_name in {
             TAPIR_TRACKER,
             BOOTSTAPIR_TRACKER,
-            SAM2_TRACKER,
-            SURGISAM2_TRACKER,
             SAM3_TRACKER,
             MEDSAM2_TRACKER,
         }:

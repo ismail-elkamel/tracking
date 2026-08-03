@@ -28,8 +28,6 @@ COTRACKER_OFFLINE_TRACKER = "CoTracker3 Offline"
 LITETRACKER_TRACKER = "LiteTracker"
 TAPIR_TRACKER = "TAPIR"
 BOOTSTAPIR_TRACKER = "BootsTAPIR"
-SAM2_TRACKER = "SAM2"
-SURGISAM2_TRACKER = "SurgiSAM2"
 SAM3_TRACKER = "SAM3"
 MEDSAM2_TRACKER = "MedSAM2"
 CUDA_DEVICE = "CUDA GPU"
@@ -281,18 +279,6 @@ def default_external_command(tracker_name: str) -> str:
             "--auto-download --repo-path external/tapnet --resize-size 256 "
             "--query-chunk-size 32 {freeze_lost_points}"
         )
-    if tracker_name == SAM2_TRACKER:
-        return (
-            "python external/Surgical-SAM-2/infer_prompts.py "
-            "--video {video} --start-frame {start_frame} --prompts {prompts} "
-            "--output {output} --device {device} --model-profile sam2 {freeze_lost_points}"
-        )
-    if tracker_name == SURGISAM2_TRACKER:
-        return (
-            "python external/Surgical-SAM-2/infer_prompts.py "
-            "--video {video} --start-frame {start_frame} --prompts {prompts} "
-            "--output {output} --device {device} --model-profile surgisam2 {freeze_lost_points}"
-        )
     if tracker_name == SAM3_TRACKER:
         return (
             "conda run -n track_env python external/SAM3/infer_prompts.py "
@@ -311,8 +297,6 @@ def default_external_command(tracker_name: str) -> str:
 def external_tracker_adapter_path(tracker_name: str) -> Path | None:
     if tracker_name in {TAPIR_TRACKER, BOOTSTAPIR_TRACKER}:
         return Path("external/TAPIR/infer_prompts.py")
-    if tracker_name in {SAM2_TRACKER, SURGISAM2_TRACKER}:
-        return Path("external/Surgical-SAM-2/infer_prompts.py")
     if tracker_name == SAM3_TRACKER:
         return Path("external/SAM3/infer_prompts.py")
     if tracker_name == MEDSAM2_TRACKER:
@@ -344,17 +328,6 @@ def external_tracker_setup_instructions(tracker_name: str) -> str:
             "Install it with `git clone https://github.com/google-deepmind/tapnet external/tapnet` "
             "then `python -m pip install -e external/tapnet[torch]`. "
             f"Download the checkpoint to `{checkpoint}` with the sidebar button."
-        )
-    if tracker_name == SAM2_TRACKER:
-        return (
-            "SAM2 uses the generic SAM2.1 checkpoint "
-            "`external/Surgical-SAM-2/checkpoints/sam2.1_hiera_small.pt`."
-        )
-    if tracker_name == SURGISAM2_TRACKER:
-        return (
-            "SurgiSAM2 requires the fine-tuned checkpoint "
-            "`external/Surgical-SAM-2/checkpoints/Curated400_checkpoint_26.pt`. "
-            "It will not silently fall back to generic SAM2."
         )
     if tracker_name == SAM3_TRACKER:
         return (
