@@ -1283,7 +1283,15 @@ with st.sidebar:
     global_motion_config: GlobalMotionConfig | None = None
     if any(tracker in GLOBAL_MOTION_TRACKERS for tracker in selected_trackers):
         with st.expander("OpenCV Global Motion settings", expanded=True):
-            global_motion_max_features = st.slider("Global motion ORB features", 200, 5000, 2000, 100)
+            global_motion_feature_detector = st.selectbox(
+                "Global motion feature detector",
+                ["ORB", "SIFT"],
+                index=0,
+                help="ORB is faster. SIFT is slower but can be more stable on difficult texture/zoom changes.",
+            )
+            if global_motion_feature_detector == "SIFT" and not hasattr(cv2, "SIFT_create"):
+                st.warning("This OpenCV build does not expose SIFT. Choose ORB or install an OpenCV build with SIFT support.")
+            global_motion_max_features = st.slider("Global motion max features", 200, 5000, 2000, 100)
             global_motion_min_inliers = st.slider("Global motion min inliers", 4, 200, 30, 1)
             global_motion_ransac_px = st.slider("Global motion RANSAC px", 1.0, 20.0, 5.0, 0.5)
             global_motion_smoothing = st.slider("Global motion smoothing", 0.0, 0.98, 0.25, 0.05)
@@ -1307,10 +1315,10 @@ with st.sidebar:
                     obj_feature_mask_remove_instruments = st.checkbox(
                         "Remove instruments from feature ROI",
                         value=True,
-                        help="Uses the instrument ONNX mask below, if enabled, to remove instrument pixels from ORB features.",
+                        help="Uses the instrument ONNX mask below, if enabled, to remove instrument pixels from feature detection.",
                     )
                 st.caption(
-                    "`OpenCV Global Motion` uses ORB features from the whole image. "
+                    "`OpenCV Global Motion` uses features from the whole image. "
                     "`OpenCV Global Motion 3D ROI` uses only the current projected 3D model area."
                 )
             global_rotation_keyframes: tuple[GlobalMotionRotationKeyframe, ...] = ()
@@ -1380,14 +1388,14 @@ with st.sidebar:
             homography_smoothing = 0.85
             homography_max_xy_change = 4.0
             homography_max_total_xy = 35.0
-            homography_point_source = "ORB matches"
+            homography_point_source = "Feature matches"
             homography_center_fraction = 0.35
             homography_point_search_radius = 80
             if xy_rotation_source in {"Homography X/Y", "Homography X/Y + manual keyframes"}:
                 st.caption("Homography estimates only X/Y tilt. Translation, zoom, and Z still come from affine global motion.")
                 homography_point_source = st.selectbox(
                     "Homography point source",
-                    ["ORB matches", "Central 4 points"],
+                    ["Feature matches", "Central 4 points"],
                     index=1,
                     help=(
                         "`Central 4 points` automatically picks four central visual points and ignores instrument pixels "
@@ -1400,7 +1408,7 @@ with st.sidebar:
                     homography_max_total_xy = st.slider("Max total X/Y deg", 5.0, 70.0, 35.0, 1.0)
                 with homography_col_b:
                     homography_max_xy_change = st.slider("Max X/Y change/frame deg", 0.2, 12.0, 4.0, 0.2)
-                if homography_point_source == "ORB matches":
+                if homography_point_source == "Feature matches":
                     homography_col_c, homography_col_d = st.columns(2)
                     with homography_col_c:
                         homography_min_inliers = st.slider("Homography min inliers", 10, 300, 60, 5)
@@ -1413,6 +1421,7 @@ with st.sidebar:
                     with homography_col_d:
                         homography_point_search_radius = st.slider("Central point search radius px", 16, 180, 80, 4)
             global_motion_config = GlobalMotionConfig(
+                feature_detector=global_motion_feature_detector,
                 max_features=int(global_motion_max_features),
                 min_inliers=int(global_motion_min_inliers),
                 ransac_reprojection_px=float(global_motion_ransac_px),

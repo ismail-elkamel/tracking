@@ -102,8 +102,8 @@ Typical use:
 
 In `Compare Models`, two OpenCV Global Motion variants can be selected side by side:
 
-- `OpenCV Global Motion`: ORB keypoints are detected on the whole image.
-- `OpenCV Global Motion 3D ROI`: ORB keypoints are detected only inside the current projected 3D model area, with optional instrument-mask removal.
+- `OpenCV Global Motion`: keypoints are detected on the whole image.
+- `OpenCV Global Motion 3D ROI`: keypoints are detected only inside the current projected 3D model area, with optional instrument-mask removal.
 
 ## OpenCV Global Motion
 
@@ -177,7 +177,8 @@ Good first values:
 
 ```text
 OpenCV frame step: 1
-Global motion ORB features: 2000
+Global motion feature detector: ORB
+Global motion max features: 2000
 Global motion min inliers: 30
 Global motion RANSAC px: 5
 Global motion smoothing: 0.25
@@ -196,16 +197,17 @@ Remove instruments from feature ROI: on when testing with instrument ONNX enable
 
 Meaning:
 
-- `ORB features`: maximum feature points detected per frame.
+- `feature detector`: `ORB` is fast; `SIFT` is slower but can be more robust on zoom, lighting changes, and weak texture.
+- `max features`: maximum feature points detected per frame.
 - `min inliers`: minimum RANSAC-agreeing matches required to accept the transform.
 - `RANSAC px`: reprojection tolerance in pixels.
 - `smoothing`: blends each accepted frame-to-frame transform with identity; higher is more stable but slower to follow real motion.
 - `max translation/frame px`: rejects sudden large jumps.
 - `max scale change/frame`: rejects sudden zoom spikes.
 - `max rotation/frame deg`: rejects sudden in-plane rotation spikes.
-- `OpenCV Global Motion 3D ROI`: detects and matches ORB features only inside the current projected 3D model area, instead of the full image.
+- `OpenCV Global Motion 3D ROI`: detects and matches features only inside the current projected 3D model area, instead of the full image.
 - `3D feature ROI padding px`: expands that projected model area before feature detection, so small frame-to-frame motion is still matched.
-- `Remove instruments from feature ROI`: removes instrument-mask pixels from the ORB search area when instrument segmentation is enabled.
+- `Remove instruments from feature ROI`: removes instrument-mask pixels from the feature search area when instrument segmentation is enabled.
 
 ## Experimental Homography X/Y
 
@@ -214,7 +216,7 @@ Homography is used only to estimate extra X/Y tilt for the 3D overlay. Translati
 Available point sources:
 
 ```text
-ORB matches
+Feature matches
 Central 4 points
 ```
 

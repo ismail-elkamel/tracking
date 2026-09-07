@@ -58,6 +58,7 @@ class TrackValidationConfig:
 
 @dataclass(frozen=True)
 class GlobalMotionConfig:
+    feature_detector: str = "ORB"
     max_features: int = 2000
     min_inliers: int = 30
     ransac_reprojection_px: float = 5.0
@@ -75,7 +76,7 @@ class GlobalMotionConfig:
     homography_smoothing: float = 0.85
     homography_max_xy_change_deg: float = 4.0
     homography_max_total_xy_deg: float = 35.0
-    homography_point_source: str = "ORB matches"
+    homography_point_source: str = "Feature matches"
     homography_center_fraction: float = 0.35
     homography_point_search_radius_px: int = 80
 
@@ -2115,6 +2116,27 @@ def prepare_feature_mask(mask: np.ndarray | None, frame_shape: tuple[int, int]) 
     return mask
 
 
+def create_global_motion_detector(config: GlobalMotionConfig):
+    detector_name = str(config.feature_detector).upper()
+    max_features = max(200, int(config.max_features))
+    if detector_name == "SIFT":
+        if not hasattr(cv2, "SIFT_create"):
+            raise RuntimeError(
+                "SIFT is not available in this OpenCV build. Install an OpenCV build with SIFT support "
+                "or choose ORB in the Global Motion settings."
+            )
+        return cv2.SIFT_create(nfeatures=max_features), cv2.NORM_L2
+    return (
+        cv2.ORB_create(
+            nfeatures=max_features,
+            scaleFactor=1.2,
+            nlevels=8,
+            fastThreshold=12,
+        ),
+        cv2.NORM_HAMMING,
+    )
+
+
 def match_global_motion_features(
     previous_gray: np.ndarray,
     next_gray: np.ndarray,
@@ -2122,16 +2144,11 @@ def match_global_motion_features(
     previous_mask: np.ndarray | None = None,
     next_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
-    orb = cv2.ORB_create(
-        nfeatures=max(200, int(config.max_features)),
-        scaleFactor=1.2,
-        nlevels=8,
-        fastThreshold=12,
-    )
+    detector, matcher_norm = create_global_motion_detector(config)
     previous_feature_mask = prepare_feature_mask(previous_mask, previous_gray.shape[:2])
     next_feature_mask = prepare_feature_mask(next_mask, next_gray.shape[:2])
-    previous_keypoints, previous_desc = orb.detectAndCompute(previous_gray, previous_feature_mask)
-    next_keypoints, next_desc = orb.detectAndCompute(next_gray, next_feature_mask)
+    previous_keypoints, previous_desc = detector.detectAndCompute(previous_gray, previous_feature_mask)
+    next_keypoints, next_desc = detector.detectAndCompute(next_gray, next_feature_mask)
     if previous_desc is None or next_desc is None:
         empty = np.empty((0, 2), dtype=np.float32)
         return empty, empty, 0
@@ -2139,7 +2156,7 @@ def match_global_motion_features(
         empty = np.empty((0, 2), dtype=np.float32)
         return empty, empty, 0
 
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+    matcher = cv2.BFMatcher(matcher_norm)
     raw_matches = matcher.knnMatch(previous_desc, next_desc, k=2)
     good_matches = []
     for pair in raw_matches:
@@ -2859,7 +2876,7 @@ def track_with_global_motion(
                 next_roi_px = int(np.count_nonzero(next_feature_mask)) if next_feature_mask is not None else 0
                 roi_text = f", roi={previous_roi_px}/{next_roi_px}px"
             status_placeholder.caption(
-                f"Global motion frame {absolute_frame} / {end_frame}: {state}, "
+                f"Global motion {config.feature_detector} frame {absolute_frame} / {end_frame}: {state}, "
                 f"{inlier_count}/{match_count} inliers, {motion_text}{xy_text}{roi_text}"
             )
             if show_live_preview:
