@@ -70,6 +70,18 @@ Run the app:
 streamlit run app.py
 ```
 
+Run the local OpenCV Global Motion test interface without Streamlit:
+
+```bash
+python global_motion_local.py
+```
+
+Then open:
+
+```text
+http://127.0.0.1:7860
+```
+
 ## App Workflows
 
 The home page has two main workflows.
@@ -98,6 +110,19 @@ Typical use:
 4. Keep `3D anchor source` as `Image motion (no points)`.
 5. Tune global motion settings.
 6. Click `Track`.
+
+### Local Global Motion Interface
+
+`global_motion_local.py` is a small Flask interface for testing only OpenCV Global Motion:
+
+- no Streamlit;
+- no CoTracker, TAPIR, SAM3, or MedSAM2;
+- no manual 2D point selection;
+- local video path or video upload;
+- local `.obj/.mtl` paths or file upload;
+- first-frame 3D placement preview;
+- output MP4 with the projected 3D model moved by global affine motion;
+- elapsed time and processed frames/second.
 
 ## OpenCV Global Motion
 
@@ -261,7 +286,12 @@ The most important files for the current global-motion work are:
 ```text
 app.py
 tracking_methods.py
+global_motion_local.py
 README.md
 ```
 
-For debugging OpenCV motion and how it affects the 3D overlay, use the Streamlit `OpenCV Global Motion` workflow.
+For debugging OpenCV motion and how it affects the 3D overlay, use either the Streamlit `OpenCV Global Motion` workflow or the standalone local interface:
+
+```bash
+python global_motion_local.py
+```
