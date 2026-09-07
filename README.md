@@ -18,6 +18,7 @@ Kept:
 
 - `OpenCV Lucas-Kanade`
 - `OpenCV Global Motion`
+- `OpenCV Global Motion 3D ROI`
 - `CoTracker3 Online`
 - `CoTracker3 Offline`
 - `LiteTracker`
@@ -98,6 +99,11 @@ Typical use:
 4. Keep `3D anchor source` as `Image motion (no points)`.
 5. Tune global motion settings.
 6. Click `Track`.
+
+In `Compare Models`, two OpenCV Global Motion variants can be selected side by side:
+
+- `OpenCV Global Motion`: ORB keypoints are detected on the whole image.
+- `OpenCV Global Motion 3D ROI`: ORB keypoints are detected only inside the current projected 3D model area, with optional instrument-mask removal.
 
 ## OpenCV Global Motion
 
@@ -183,7 +189,7 @@ Max rotation/frame deg: 8
 Experimental organ-local feature mode:
 
 ```text
-Use 3D model area for ORB features: off by default
+OpenCV Global Motion 3D ROI: separate compare option
 3D feature ROI padding px: 48
 Remove instruments from feature ROI: on when testing with instrument ONNX enabled
 ```
@@ -197,7 +203,7 @@ Meaning:
 - `max translation/frame px`: rejects sudden large jumps.
 - `max scale change/frame`: rejects sudden zoom spikes.
 - `max rotation/frame deg`: rejects sudden in-plane rotation spikes.
-- `Use 3D model area for ORB features`: detects and matches ORB features only inside the current projected 3D model area, instead of the full image.
+- `OpenCV Global Motion 3D ROI`: detects and matches ORB features only inside the current projected 3D model area, instead of the full image.
 - `3D feature ROI padding px`: expands that projected model area before feature detection, so small frame-to-frame motion is still matched.
 - `Remove instruments from feature ROI`: removes instrument-mask pixels from the ORB search area when instrument segmentation is enabled.
 

@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from tracking_methods import (
     InstrumentAvoidanceConfig,
     LITETRACKER_TRACKER,
     MEDSAM2_TRACKER,
+    OPENCV_GLOBAL_MOTION_ROI_TRACKER,
     OPENCV_GLOBAL_MOTION_TRACKER,
     OPENCV_TRACKER,
     SAM3_TRACKER,
@@ -91,11 +92,12 @@ TEMP_DIR = Path(tempfile.gettempdir()) / "surgical_video_tracker"
 UPLOAD_DIR = TEMP_DIR / "uploads"
 OUTPUT_DIR = TEMP_DIR / "output"
 MAX_CANVAS_WIDTH = 900
-DEFAULT_OBJ_ROTATION = (-40, 20, -15)
+DEFAULT_OBJ_ROTATION = (-60, 16, -32)
 DEFAULT_OBJ_SCALE_FRACTION = 0.5
 TRACKER_OPTIONS = [
     OPENCV_TRACKER,
     OPENCV_GLOBAL_MOTION_TRACKER,
+    OPENCV_GLOBAL_MOTION_ROI_TRACKER,
     COTRACKER_TRACKER,
     COTRACKER_OFFLINE_TRACKER,
     LITETRACKER_TRACKER,
@@ -104,6 +106,7 @@ TRACKER_OPTIONS = [
     SAM3_TRACKER,
     MEDSAM2_TRACKER,
 ]
+GLOBAL_MOTION_TRACKERS = {OPENCV_GLOBAL_MOTION_TRACKER, OPENCV_GLOBAL_MOTION_ROI_TRACKER}
 WORKFLOW_COMPARE = "Compare models"
 WORKFLOW_GLOBAL_MOTION = "OpenCV Global Motion"
 
@@ -1099,7 +1102,12 @@ def run_tracker_model(
             instrument_avoidance,
             track_validation,
         )
-    if tracker_name == OPENCV_GLOBAL_MOTION_TRACKER:
+    if tracker_name in GLOBAL_MOTION_TRACKERS:
+        effective_global_motion_config = global_motion_config or GlobalMotionConfig()
+        effective_global_motion_config = replace(
+            effective_global_motion_config,
+            use_obj_feature_mask=tracker_name == OPENCV_GLOBAL_MOTION_ROI_TRACKER,
+        )
         return track_with_global_motion(
             str(video_path),
             start_frame,
@@ -1112,7 +1120,7 @@ def run_tracker_model(
             result_path,
             show_live_preview,
             instrument_avoidance,
-            global_motion_config,
+            effective_global_motion_config,
         )
     if tracker_name == COTRACKER_TRACKER:
         return track_with_cotracker3_online(
@@ -1258,18 +1266,22 @@ with st.sidebar:
         selected_trackers = st.multiselect(
             "Models to compare",
             tracker_options,
-            default=[OPENCV_TRACKER, COTRACKER_TRACKER],
+            default=[OPENCV_GLOBAL_MOTION_TRACKER, OPENCV_GLOBAL_MOTION_ROI_TRACKER],
         )
         tracker_name = selected_trackers[0] if selected_trackers else OPENCV_TRACKER
         collage_tile_width = st.slider("Collage tile width", 320, 960, 640, 64)
     else:
-        tracker_name = OPENCV_GLOBAL_MOTION_TRACKER
+        tracker_name = st.selectbox(
+            "Global motion version",
+            [OPENCV_GLOBAL_MOTION_TRACKER, OPENCV_GLOBAL_MOTION_ROI_TRACKER],
+            index=0,
+        )
         selected_trackers = [tracker_name]
         collage_tile_width = 640
         st.caption("OpenCV Global Motion workflow: no neural point tracker is required.")
     frame_skip = st.slider("OpenCV frame step", 1, 10, 1)
     global_motion_config: GlobalMotionConfig | None = None
-    if OPENCV_GLOBAL_MOTION_TRACKER in selected_trackers:
+    if any(tracker in GLOBAL_MOTION_TRACKERS for tracker in selected_trackers):
         with st.expander("OpenCV Global Motion settings", expanded=True):
             global_motion_max_features = st.slider("Global motion ORB features", 200, 5000, 2000, 100)
             global_motion_min_inliers = st.slider("Global motion min inliers", 4, 200, 30, 1)
@@ -1278,17 +1290,9 @@ with st.sidebar:
             global_motion_max_translation = st.slider("Max translation/frame px", 5.0, 300.0, 80.0, 5.0)
             global_motion_max_scale = st.slider("Max scale change/frame", 0.01, 0.60, 0.12, 0.01)
             global_motion_max_rotation = st.slider("Max rotation/frame deg", 1.0, 45.0, 8.0, 1.0)
-            use_obj_feature_mask = st.checkbox(
-                "Use 3D model area for ORB features",
-                value=False,
-                help=(
-                    "When enabled, OpenCV Global Motion detects/matches ORB features only inside "
-                    "the current projected 3D model area instead of the whole image."
-                ),
-            )
             obj_feature_mask_padding = 48
             obj_feature_mask_remove_instruments = True
-            if use_obj_feature_mask:
+            if OPENCV_GLOBAL_MOTION_ROI_TRACKER in selected_trackers:
                 feature_mask_col_a, feature_mask_col_b = st.columns(2)
                 with feature_mask_col_a:
                     obj_feature_mask_padding = st.slider(
@@ -1306,7 +1310,8 @@ with st.sidebar:
                         help="Uses the instrument ONNX mask below, if enabled, to remove instrument pixels from ORB features.",
                     )
                 st.caption(
-                    "Use this to test organ-local motion. Disable it to compare against the normal full-image Global Motion."
+                    "`OpenCV Global Motion` uses ORB features from the whole image. "
+                    "`OpenCV Global Motion 3D ROI` uses only the current projected 3D model area."
                 )
             global_rotation_keyframes: tuple[GlobalMotionRotationKeyframe, ...] = ()
             xy_rotation_source = st.selectbox(
@@ -1415,7 +1420,7 @@ with st.sidebar:
                 max_translation_px=float(global_motion_max_translation),
                 max_scale_change=float(global_motion_max_scale),
                 max_rotation_deg=float(global_motion_max_rotation),
-                use_obj_feature_mask=bool(use_obj_feature_mask),
+                use_obj_feature_mask=False,
                 obj_feature_mask_padding_px=int(obj_feature_mask_padding),
                 obj_feature_mask_remove_instruments=bool(obj_feature_mask_remove_instruments),
                 rotation_keyframes=global_rotation_keyframes,
@@ -1899,7 +1904,7 @@ try:
                 obj_anchor_source = st.selectbox(
                     "3D anchor source",
                     anchor_source_options,
-                    index=1 if OPENCV_GLOBAL_MOTION_TRACKER in selected_trackers else (2 if add_point_cloud else 0),
+                    index=1 if any(tracker in GLOBAL_MOTION_TRACKERS for tracker in selected_trackers) else (2 if add_point_cloud else 0),
                     help=(
                         "Manual uses the points you draw as OBJ anchors. "
                         "Image motion follows frame-to-frame camera/image transform without point tracking. "
@@ -2132,7 +2137,7 @@ try:
             )
             obj_anchor_points_3d = obj_model_points_3d[obj_anchor_indices]
             obj_registered_transform_mode = "Similarity"
-            if OPENCV_GLOBAL_MOTION_TRACKER not in selected_trackers:
+            if not any(tracker in GLOBAL_MOTION_TRACKERS for tracker in selected_trackers):
                 st.warning("`Image motion (no points)` is intended for `Tracker -> OpenCV Global Motion`.")
         elif obj_anchor_source == "Drawn region points":
             point_tracks, _ = generate_grid_tracks(

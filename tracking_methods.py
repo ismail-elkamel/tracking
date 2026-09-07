@@ -23,6 +23,7 @@ BOOTSTAPIR_WEIGHTS_URL = "https://storage.googleapis.com/dm-tapnet/bootstap/boot
 
 OPENCV_TRACKER = "OpenCV Lucas-Kanade"
 OPENCV_GLOBAL_MOTION_TRACKER = "OpenCV Global Motion"
+OPENCV_GLOBAL_MOTION_ROI_TRACKER = "OpenCV Global Motion 3D ROI"
 COTRACKER_TRACKER = "CoTracker3 Online"
 COTRACKER_OFFLINE_TRACKER = "CoTracker3 Offline"
 LITETRACKER_TRACKER = "LiteTracker"
