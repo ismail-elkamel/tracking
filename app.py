@@ -1478,12 +1478,14 @@ with st.sidebar:
             if instrument_use_gpu and "CUDAExecutionProvider" not in available_onnx_providers:
                 st.warning(
                     "Instrument ONNX cannot use GPU because ONNXRuntime has no CUDAExecutionProvider. "
-                    f"Available providers: {available_onnx_providers}."
+                    f"Available providers: {available_onnx_providers}. Falling back to CPU for the instrument mask."
                 )
+                instrument_device_name = CPU_DEVICE
             else:
                 st.caption(f"Instrument ONNX providers: {available_onnx_providers}")
         except RuntimeError as error:
             st.warning(str(error))
+            instrument_device_name = CPU_DEVICE
         instrument_avoidance = InstrumentAvoidanceConfig(
             onnx_path=instrument_onnx_path,
             image_size=instrument_mask_size,
