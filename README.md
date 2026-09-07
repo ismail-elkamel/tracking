@@ -70,24 +70,6 @@ Run the app:
 streamlit run app.py
 ```
 
-Run the desktop OpenCV Global Motion test interface without Streamlit:
-
-```bash
-python global_motion_desktop.py
-```
-
-Run the browser-based local OpenCV Global Motion test interface without Streamlit:
-
-```bash
-python global_motion_local.py
-```
-
-Then open:
-
-```text
-http://127.0.0.1:7860
-```
-
 ## App Workflows
 
 The home page has two main workflows.
@@ -116,32 +98,6 @@ Typical use:
 4. Keep `3D anchor source` as `Image motion (no points)`.
 5. Tune global motion settings.
 6. Click `Track`.
-
-### Desktop Global Motion Interface
-
-`global_motion_desktop.py` is a small local desktop application for testing only OpenCV Global Motion:
-
-- no Streamlit;
-- no browser UI;
-- no CoTracker, TAPIR, SAM3, or MedSAM2;
-- no manual 2D point selection;
-- local file pickers for video and `.obj/.mtl` files;
-- first-frame 3D placement preview;
-- output MP4 with the projected 3D model moved by global affine motion;
-- elapsed time and processed frames/second.
-
-### Browser Global Motion Interface
-
-`global_motion_local.py` is a small Flask interface for testing only OpenCV Global Motion:
-
-- no Streamlit;
-- no CoTracker, TAPIR, SAM3, or MedSAM2;
-- no manual 2D point selection;
-- local video path or video upload;
-- local `.obj/.mtl` paths or file upload;
-- first-frame 3D placement preview;
-- output MP4 with the projected 3D model moved by global affine motion;
-- elapsed time and processed frames/second.
 
 ## OpenCV Global Motion
 
@@ -305,19 +261,7 @@ The most important files for the current global-motion work are:
 ```text
 app.py
 tracking_methods.py
-global_motion_desktop.py
-global_motion_local.py
 README.md
 ```
 
-For debugging OpenCV motion and how it affects the 3D overlay, use either the Streamlit `OpenCV Global Motion` workflow or the standalone desktop interface:
-
-```bash
-python global_motion_desktop.py
-```
-
-The browser-based local interface is also available:
-
-```bash
-python global_motion_local.py
-```
+For debugging OpenCV motion and how it affects the 3D overlay, use the Streamlit `OpenCV Global Motion` workflow.
