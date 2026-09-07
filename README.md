@@ -180,6 +180,14 @@ Max scale change/frame: 0.12
 Max rotation/frame deg: 8
 ```
 
+Experimental organ-local feature mode:
+
+```text
+Use 3D model area for ORB features: off by default
+3D feature ROI padding px: 48
+Remove instruments from feature ROI: on when testing with instrument ONNX enabled
+```
+
 Meaning:
 
 - `ORB features`: maximum feature points detected per frame.
@@ -189,6 +197,9 @@ Meaning:
 - `max translation/frame px`: rejects sudden large jumps.
 - `max scale change/frame`: rejects sudden zoom spikes.
 - `max rotation/frame deg`: rejects sudden in-plane rotation spikes.
+- `Use 3D model area for ORB features`: detects and matches ORB features only inside the current projected 3D model area, instead of the full image.
+- `3D feature ROI padding px`: expands that projected model area before feature detection, so small frame-to-frame motion is still matched.
+- `Remove instruments from feature ROI`: removes instrument-mask pixels from the ORB search area when instrument segmentation is enabled.
 
 ## Experimental Homography X/Y
 

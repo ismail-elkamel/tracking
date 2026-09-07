@@ -1278,6 +1278,36 @@ with st.sidebar:
             global_motion_max_translation = st.slider("Max translation/frame px", 5.0, 300.0, 80.0, 5.0)
             global_motion_max_scale = st.slider("Max scale change/frame", 0.01, 0.60, 0.12, 0.01)
             global_motion_max_rotation = st.slider("Max rotation/frame deg", 1.0, 45.0, 8.0, 1.0)
+            use_obj_feature_mask = st.checkbox(
+                "Use 3D model area for ORB features",
+                value=False,
+                help=(
+                    "When enabled, OpenCV Global Motion detects/matches ORB features only inside "
+                    "the current projected 3D model area instead of the whole image."
+                ),
+            )
+            obj_feature_mask_padding = 48
+            obj_feature_mask_remove_instruments = True
+            if use_obj_feature_mask:
+                feature_mask_col_a, feature_mask_col_b = st.columns(2)
+                with feature_mask_col_a:
+                    obj_feature_mask_padding = st.slider(
+                        "3D feature ROI padding px",
+                        0,
+                        160,
+                        48,
+                        4,
+                        help="Expands the projected 3D model mask so ORB can still match after frame-to-frame motion.",
+                    )
+                with feature_mask_col_b:
+                    obj_feature_mask_remove_instruments = st.checkbox(
+                        "Remove instruments from feature ROI",
+                        value=True,
+                        help="Uses the instrument ONNX mask below, if enabled, to remove instrument pixels from ORB features.",
+                    )
+                st.caption(
+                    "Use this to test organ-local motion. Disable it to compare against the normal full-image Global Motion."
+                )
             global_rotation_keyframes: tuple[GlobalMotionRotationKeyframe, ...] = ()
             xy_rotation_source = st.selectbox(
                 "X/Y rotation source",
@@ -1385,6 +1415,9 @@ with st.sidebar:
                 max_translation_px=float(global_motion_max_translation),
                 max_scale_change=float(global_motion_max_scale),
                 max_rotation_deg=float(global_motion_max_rotation),
+                use_obj_feature_mask=bool(use_obj_feature_mask),
+                obj_feature_mask_padding_px=int(obj_feature_mask_padding),
+                obj_feature_mask_remove_instruments=bool(obj_feature_mask_remove_instruments),
                 rotation_keyframes=global_rotation_keyframes,
                 xy_rotation_source=xy_rotation_source,
                 homography_min_inliers=int(homography_min_inliers),

@@ -64,6 +64,9 @@ class GlobalMotionConfig:
     max_translation_px: float = 80.0
     max_scale_change: float = 0.12
     max_rotation_deg: float = 8.0
+    use_obj_feature_mask: bool = False
+    obj_feature_mask_padding_px: int = 48
+    obj_feature_mask_remove_instruments: bool = True
     rotation_keyframes: tuple["GlobalMotionRotationKeyframe", ...] = ()
     xy_rotation_source: str = "Disabled"
     homography_min_inliers: int = 60
@@ -2095,10 +2098,28 @@ def homogeneous_to_affine(transform: np.ndarray) -> np.ndarray:
     return transform[:2, :].astype(np.float32)
 
 
+def prepare_feature_mask(mask: np.ndarray | None, frame_shape: tuple[int, int]) -> np.ndarray | None:
+    if mask is None:
+        return None
+    height, width = frame_shape
+    if mask.shape[:2] != (height, width):
+        mask = cv2.resize(
+            mask.astype(np.uint8),
+            (width, height),
+            interpolation=cv2.INTER_NEAREST,
+        )
+    mask = mask.astype(np.uint8, copy=False)
+    if mask.max(initial=0) <= 1:
+        mask = mask * 255
+    return mask
+
+
 def match_global_motion_features(
     previous_gray: np.ndarray,
     next_gray: np.ndarray,
     config: GlobalMotionConfig,
+    previous_mask: np.ndarray | None = None,
+    next_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     orb = cv2.ORB_create(
         nfeatures=max(200, int(config.max_features)),
@@ -2106,8 +2127,10 @@ def match_global_motion_features(
         nlevels=8,
         fastThreshold=12,
     )
-    previous_keypoints, previous_desc = orb.detectAndCompute(previous_gray, None)
-    next_keypoints, next_desc = orb.detectAndCompute(next_gray, None)
+    previous_feature_mask = prepare_feature_mask(previous_mask, previous_gray.shape[:2])
+    next_feature_mask = prepare_feature_mask(next_mask, next_gray.shape[:2])
+    previous_keypoints, previous_desc = orb.detectAndCompute(previous_gray, previous_feature_mask)
+    next_keypoints, next_desc = orb.detectAndCompute(next_gray, next_feature_mask)
     if previous_desc is None or next_desc is None:
         empty = np.empty((0, 2), dtype=np.float32)
         return empty, empty, 0
@@ -2160,8 +2183,16 @@ def estimate_global_motion_transform(
     previous_gray: np.ndarray,
     next_gray: np.ndarray,
     config: GlobalMotionConfig,
+    previous_mask: np.ndarray | None = None,
+    next_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray | None, int, int]:
-    source, target, match_count = match_global_motion_features(previous_gray, next_gray, config)
+    source, target, match_count = match_global_motion_features(
+        previous_gray,
+        next_gray,
+        config,
+        previous_mask,
+        next_mask,
+    )
     return estimate_global_motion_from_matches(source, target, match_count, config)
 
 
@@ -2565,6 +2596,83 @@ def transform_groups_with_global_motion(
     return [apply_obj_transform(track, transform) for track in initial_tracks]
 
 
+def global_motion_obj_feature_mask(
+    labels: list[str],
+    cumulative_transform: np.ndarray,
+    frame_shape: tuple[int, int],
+    instrument_mask: np.ndarray | None,
+    config: GlobalMotionConfig,
+) -> np.ndarray | None:
+    if not config.use_obj_feature_mask:
+        return None
+
+    height, width = frame_shape
+    mask = np.zeros((height, width), dtype=np.uint8)
+    transform = homogeneous_to_affine(cumulative_transform)
+
+    for label in labels:
+        if not label.startswith("obj "):
+            continue
+        metadata = OBJ_OVERLAYS.get(label)
+        if metadata is None or len(metadata.model_points) == 0:
+            continue
+
+        points = apply_obj_transform(metadata.model_points, transform)
+        rendered_faces = 0
+        for face in metadata.faces:
+            valid_face = [index for index in face if 0 <= index < len(points)]
+            if len(valid_face) < 3:
+                continue
+            polygon = np.round(points[valid_face]).astype(np.int32)
+            in_frame = (
+                (polygon[:, 0] >= 0)
+                & (polygon[:, 0] < width)
+                & (polygon[:, 1] >= 0)
+                & (polygon[:, 1] < height)
+            )
+            if not bool(in_frame.any()):
+                continue
+            cv2.fillPoly(mask, [polygon], 255, lineType=cv2.LINE_AA)
+            rendered_faces += 1
+
+        if rendered_faces == 0 and len(points) >= 3:
+            pts = np.round(points).astype(np.int32)
+            in_frame = (
+                (pts[:, 0] >= 0)
+                & (pts[:, 0] < width)
+                & (pts[:, 1] >= 0)
+                & (pts[:, 1] < height)
+            )
+            pts = pts[in_frame]
+            if len(pts) >= 3:
+                hull = cv2.convexHull(pts)
+                cv2.fillConvexPoly(mask, hull, 255, lineType=cv2.LINE_AA)
+
+    padding = max(0, int(config.obj_feature_mask_padding_px))
+    if padding > 0 and int(np.count_nonzero(mask)) > 0:
+        kernel_size = padding * 2 + 1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+        mask = cv2.dilate(mask, kernel)
+
+    if (
+        config.obj_feature_mask_remove_instruments
+        and instrument_mask is not None
+        and int(np.count_nonzero(mask)) > 0
+    ):
+        instruments = instrument_mask.astype(bool, copy=False)
+        if instruments.shape[:2] != mask.shape[:2]:
+            instruments = cv2.resize(
+                instruments.astype(np.uint8),
+                (width, height),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(bool)
+        mask[instruments] = 0
+
+    if int(np.count_nonzero(mask)) == 0:
+        return mask
+    return mask
+
+
 def track_with_global_motion(
     path: str,
     start_frame: int,
@@ -2638,10 +2746,26 @@ def track_with_global_motion(
             next_gray = cv2.cvtColor(next_bgr, cv2.COLOR_BGR2GRAY)
             next_rgb = cv2.cvtColor(next_bgr, cv2.COLOR_BGR2RGB)
             next_instrument_mask = predict_instrument_mask(next_rgb, instrument_avoidance)
+            previous_feature_mask = global_motion_obj_feature_mask(
+                labels,
+                cumulative_transform,
+                previous_gray.shape[:2],
+                previous_instrument_mask,
+                config,
+            )
+            next_feature_mask = global_motion_obj_feature_mask(
+                labels,
+                cumulative_transform,
+                next_gray.shape[:2],
+                next_instrument_mask,
+                config,
+            )
             source_points, target_points, match_count = match_global_motion_features(
                 previous_gray,
                 next_gray,
                 config,
+                previous_feature_mask,
+                next_feature_mask,
             )
             transform, match_count, inlier_count = estimate_global_motion_from_matches(
                 source_points,
@@ -2728,9 +2852,14 @@ def track_with_global_motion(
                 xy_text = f", xy rx={rotate_x:+.1f} ry={rotate_y:+.1f}"
             if homography_text:
                 xy_text = f"{xy_text}, {homography_text}" if xy_text else f", {homography_text}"
+            roi_text = ""
+            if config.use_obj_feature_mask:
+                previous_roi_px = int(np.count_nonzero(previous_feature_mask)) if previous_feature_mask is not None else 0
+                next_roi_px = int(np.count_nonzero(next_feature_mask)) if next_feature_mask is not None else 0
+                roi_text = f", roi={previous_roi_px}/{next_roi_px}px"
             status_placeholder.caption(
                 f"Global motion frame {absolute_frame} / {end_frame}: {state}, "
-                f"{inlier_count}/{match_count} inliers, {motion_text}{xy_text}"
+                f"{inlier_count}/{match_count} inliers, {motion_text}{xy_text}{roi_text}"
             )
             if show_live_preview:
                 sync_to_video_clock(start_time, absolute_frame - start_frame, fps)
